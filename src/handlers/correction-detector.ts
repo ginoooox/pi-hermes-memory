@@ -28,19 +28,6 @@ import { execChildPrompt, resolveChildPiModel } from "./pi-child-process.js";
 import { resolveProjectName, resolveProjectStore, type ProjectNameRef, type ProjectStoreRef } from "../project-context.js";
 import { runDirectMemoryCompletion, usesDirectTransport } from "./review-memory-ops.js";
 
-/**
- * Extract the directive part from a correction message.
- * E.g., "no, use pnpm instead" -> "use pnpm instead"
- */
-function extractCorrectionDirective(text: string): string {
-  // Remove common correction starters
-  const cleaned = text
-    .replace(/^(no|wrong|actually|stop|don'?t|that'?s not|I said|I told you)[,\.\s!]+/i, '')
-    .replace(/^(please\s+)?/i, '')
-    .trim();
-  return cleaned || text;
-}
-
 function compileCorrectionPatterns(
   configured: string[] | undefined,
   defaults: RegExp[],
@@ -98,6 +85,8 @@ export function isCorrection(text: string, config?: CorrectionPatternConfig): bo
   for (const pattern of negativePatterns) {
     if (pattern.test(text)) return false;
   }
+
+  if (/^(?:不[，,、]|不对|不是这样|我的意思是|我说的是|别再|不要再|以后请|记住[：:])/u.test(text.trim())) return true;
 
   // Check strong patterns — always trigger
   for (const pattern of strongPatterns) {
@@ -244,7 +233,7 @@ export function setupCorrectionDetector(
       };
 
       let handledDirect = false;
-      if (usesDirectTransport(config)) {
+      if (usesDirectTransport(config) || store.writeAdmissionEnabled) {
         try {
           const directResult = await runDirect(
             ctx,
@@ -264,6 +253,7 @@ export function setupCorrectionDetector(
             dbManager,
             activeProjectName,
           );
+          if (directResult.pendingCount) ctx.ui.notify("📝 Correction proposal awaiting review; active memory unchanged", "info");
           if (directResult.ok) {
             savedViaLlm = directResult.appliedCount > 0;
             handledDirect = true;
@@ -273,7 +263,7 @@ export function setupCorrectionDetector(
         }
       }
 
-      if (!handledDirect) {
+      if (!handledDirect && !store.writeAdmissionEnabled) {
         await runSubprocessCorrection();
       }
 
@@ -281,21 +271,9 @@ export function setupCorrectionDetector(
         ctx.ui.notify("🔧 Correction detected — memory updated", "info");
       }
 
-      // Also save as a failure memory for learning
-      try {
-        if (correctionText) {
-          const directive = extractCorrectionDirective(correctionText);
-          const failureReason = "User corrected the agent";
-          const scopedProjectName = activeProjectStore ? activeProjectName : null;
-          await store.addFailure(directive, {
-            category: "correction",
-            failureReason,
-            project: scopedProjectName ?? undefined,
-          });
-        }
-      } catch {
-        // Best-effort — don't block the session
-      }
+      // The direct completion is the sole correction proposal chain. Never
+      // append the raw correction again after the model has handled it.
+
     } catch {
       // Best-effort — don't block the session
     } finally {

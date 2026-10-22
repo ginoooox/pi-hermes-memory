@@ -191,7 +191,7 @@ export function setupSessionFlush(
 
       const budget = linkBudget(signal, timeoutMs);
       try {
-        if (usesDirectTransport(config)) {
+        if (usesDirectTransport(config) || store.writeAdmissionEnabled) {
           try {
             const directResult = await runDirect(
               ctx,
@@ -216,6 +216,8 @@ export function setupSessionFlush(
             // Fall through with leftover, not a copied ceiling.
           }
         }
+
+        if (store.writeAdmissionEnabled) return; // Never spawn a writing child outside admission.
 
         const handoff = resolveFlushHandoff(Boolean(signal?.aborted), timeoutMs, now() - started);
         if ("skip" in handoff) {

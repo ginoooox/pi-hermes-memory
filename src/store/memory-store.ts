@@ -38,6 +38,8 @@ import type {
 import { AGENT_ROOT } from "../paths.js";
 import { canonicalMarkdownIdentity, withMarkdownMutationLock } from "./markdown-mutation-lock.js";
 
+import { WriteAdmission, currentWriteContext, withWriteContext, fingerprint, type Decoded } from "./write-admission.js";
+
 const MAX_EXTERNAL_WRITE_RETRIES = 2;
 const RECOVERY_ACTIVE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const RECOVERY_SNAPSHOT_MIN_INTERVAL_MS = 60 * 60 * 1000;
@@ -63,6 +65,10 @@ export class MemoryStore {
   private consolidator: ((target: "memory" | "user" | "failure", signal?: AbortSignal) => Promise<ConsolidationResult>) | null = null;
   private overflowSince: Partial<Record<"memory" | "user" | "failure", number>> = {};
   private mutationObserver: ((target: "memory" | "user" | "failure", entries: string[]) => Promise<string | null | undefined>) | null = null;
+
+  private admissionEnabled = false;
+  setWriteAdmission(enabled = true): void { this.admissionEnabled = enabled; }
+  get writeAdmissionEnabled(): boolean { return this.admissionEnabled; }
 
   constructor(private config: MemoryConfig) {}
 
@@ -304,6 +310,7 @@ export class MemoryStore {
       target,
       (markMutation) => this._add(target, content, signal, addedMessage, project, markMutation),
       signal,
+      [{ action: "add", content, project }],
     );
     if (
       result.success
@@ -444,7 +451,7 @@ export class MemoryStore {
 
         const oldText = normalizeMemoryLookupText(operation.oldText ?? "");
         if (!oldText) return { success: false, error: `Memory mutation ${operation.action} requires old_text.` };
-        const matches = plannedEntries.filter((entry) => this.stripMetadata(entry).includes(oldText));
+        const matches = plannedEntries.filter((entry) => this.matchesLookup(target, entry, oldText));
         if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
         if (matches.length > 1 && !this.areDistinctScopedFailureCopies(target, matches)) {
           return { success: false, error: `Multiple entries matched '${oldText}'. Be more specific.` };
@@ -466,7 +473,7 @@ export class MemoryStore {
           const decoded = this.decodeEntry(entry);
           return [entry, this.encodeEntry(content, decoded.created, today, decoded.project ?? undefined)];
         }));
-        plannedEntries = plannedEntries.map((entry) => replacements.get(entry) ?? entry);
+        plannedEntries = this.collapseExactEntries(target, plannedEntries.map((entry) => replacements.get(entry) ?? entry));
       }
 
       const originalTotal = originalEntries.join(ENTRY_DELIMITER).length;
@@ -488,14 +495,14 @@ export class MemoryStore {
       await this.saveToDisk(target);
       markMutation();
       return this.successResponse(target, `Applied ${operations.length} memory operations atomically.`);
-    }, options.signal);
+    }, options.signal, operations.map(o => ({ ...o, category: undefined, failureReason: undefined, content: target === "failure" && o.action === "add" && o.category && o.content ? this.buildFailureMemoryText(o.content, { category: o.category, failureReason: o.failureReason }) : o.content })));
   }
 
   async replace(target: "memory" | "user" | "failure", oldText: string, newContent: string, signal?: AbortSignal): Promise<MemoryResult> {
     return this.runTargetMutation(
       target,
       (markMutation) => this.replaceUnlocked(target, oldText, newContent, markMutation),
-      signal,
+      signal, [{ action: "replace", oldText, content: newContent }],
     );
   }
 
@@ -516,7 +523,7 @@ export class MemoryStore {
     await this.syncTargetFromDiskIfChanged(target);
     const entries = this.entriesFor(target);
     // Match against stripped text (entries may have metadata comments)
-    const matches = entries.filter((e) => this.stripMetadata(e).includes(oldText));
+    const matches = entries.filter((e) => this.matchesLookup(target, e, oldText));
 
     if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
     if (matches.length > 1 && !this.areDistinctScopedFailureCopies(target, matches)) {
@@ -534,7 +541,7 @@ export class MemoryStore {
       const decoded = this.decodeEntry(entry);
       return [entry, this.encodeEntry(newContent, decoded.created, today, decoded.project ?? undefined)];
     }));
-    const testEntries = entries.map((entry) => replacements.get(entry) ?? entry);
+    const testEntries = this.collapseExactEntries(target, entries.map((entry) => replacements.get(entry) ?? entry));
 
     const newTotal = testEntries.join(ENTRY_DELIMITER).length;
 
@@ -556,7 +563,7 @@ export class MemoryStore {
     return this.runTargetMutation(
       target,
       (markMutation) => this.removeUnlocked(target, oldText, markMutation),
-      signal,
+      signal, [{ action: "remove", oldText }],
     );
   }
 
@@ -570,7 +577,7 @@ export class MemoryStore {
 
     await this.syncTargetFromDiskIfChanged(target);
     const entries = this.entriesFor(target);
-    const matches = entries.filter((e) => this.stripMetadata(e).includes(oldText));
+    const matches = entries.filter((e) => this.matchesLookup(target, e, oldText));
 
     if (matches.length === 0) return { success: false, error: `No entry matched '${oldText}'.` };
     if (matches.length > 1 && !this.areDistinctScopedFailureCopies(target, matches)) {
@@ -587,6 +594,73 @@ export class MemoryStore {
     markMutation();
 
     return this.successResponse(target, "Entry removed.");
+  }
+
+  /** Review/restore uses stable ids and an optimistic fingerprint under the mutation lock. */
+  async reviewAdmission(target: "memory" | "user" | "failure", action: "list" | "active" | "history" | "show" | "approve" | "reject" | "restore" | "duplicate", id?: string,
+    options: { replaceId?: string; revision?: number; signal?: AbortSignal; limit?: number; offset?: number } = {}): Promise<any> {
+    if (!this.admissionEnabled) return { success: false, error: "Write admission is disabled." };
+    const storagePath = await this.resolveStoragePath(target);
+    const prepared = await withMarkdownMutationLock(storagePath, async () => {
+      await this.syncTargetFromDiskIfChanged(target);
+      const ledger = new WriteAdmission(storagePath + ".admission.json");
+      await ledger.load(); ledger.reconcile(this.decodedEntries(target)); await ledger.save();
+      const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 30)));
+      const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+      if (action === "active" || action === "history") {
+        const entries = ledger.entries.filter(e => (action === "history" || e.status === "active") && (!id || e.id === id));
+        return { done: true, result: { success: true, total: entries.length, offset, entries: entries.slice(offset, offset + limit) } };
+      }
+      if (action === "list") {
+        const candidates = ledger.candidates.filter(c => c.status === "pending").reverse();
+        return { done: true, result: { success: true, total: candidates.length, offset, candidates: candidates.slice(offset, offset + limit) } };
+      }
+      if (action === "restore") {
+        const entry = ledger.entries.find(e => e.id === id && e.status === "superseded" && (options.revision === undefined || e.revision === options.revision));
+        if (!entry) return { done: true, result: { success: false, error: "Archived id/revision not found." } };
+        const current = ledger.entries.find(e => e.id === id && e.status === "active");
+        return { operations: current ? [{ action: "replace" as const, oldText: current.text, content: entry.text }] : [{ action: "add" as const, content: entry.text, project: entry.project ?? undefined }],
+          fp: fingerprint(this.entriesFor(target)), matchRaw: current?.raw, restoreId: entry.id, restoreProject: entry.project, restoreText: entry.text };
+      }
+      const candidate = ledger.candidates.find(c => c.id === id);
+      if (!candidate) return { done: true, result: { success: false, error: "Candidate id not found." } };
+      if (action === "show") return { done: true, result: { success: true, candidate } };
+      if (candidate.status !== "pending") return { done: true, result: { success: false, error: `Candidate already ${candidate.status}.` } };
+      if (action === "reject" || action === "duplicate") {
+        if (action === "duplicate" && !ledger.entries.some(e => e.id === options.replaceId && e.status === "active")) return { done: true, result: { success: false, error: "duplicate requires an active replaceId in this scope." } };
+        candidate.status = action === "reject" ? "rejected" : "duplicate";
+        candidate.result = options.replaceId;
+        await ledger.save(); return { done: true, result: { success: true, status: candidate.status } };
+      }
+      if (candidate.fingerprint !== fingerprint(this.entriesFor(target))) return { done: true, result: { success: false, error: "Stale candidate: active memory changed. Reject and resubmit against current memory." } };
+      let operations = candidate.operations;
+      let matchRaw: string | undefined = candidate.matchRaw;
+      if (options.replaceId) {
+        const existing = ledger.entries.find(e => e.id === options.replaceId && e.status === "active");
+        if (!existing || operations.length !== 1 || operations[0].action !== "add") return { done: true, result: { success: false, error: "Merge requires a single add and an active id." } };
+        if (existing.project !== (operations[0].project?.trim() || null)) return { done: true, result: { success: false, error: "Cannot merge across project scopes." } };
+        operations = [{ action: "replace", oldText: existing.text, content: operations[0].content }]; matchRaw = existing.raw;
+      }
+      return { operations, fp: candidate.fingerprint, matchRaw, sources: candidate.sources, requireShrink: candidate.requireShrink, failureProject: candidate.failureProject };
+    });
+    if (prepared.done) return prepared.result;
+    const result = await withWriteContext({ origin: "approval", sources: [...(prepared.sources ?? []), ...(currentWriteContext()?.sources ?? [])],
+      candidateId: id, expectedFingerprint: prepared.fp, matchRaw: prepared.matchRaw, failureProject: prepared.failureProject },
+      () => this.applyMutationPlan(target, prepared.operations!, { signal: options.signal, requireShrink: prepared.requireShrink }));
+    if (result.success) await withMarkdownMutationLock(storagePath, async () => {
+      const ledger = new WriteAdmission(storagePath + ".admission.json"); await ledger.load();
+      if (action === "restore" && prepared.restoreId) {
+        const restored = ledger.entries.find(e => e.status === "active" && e.text === prepared.restoreText && e.project === prepared.restoreProject);
+        if (restored && restored.id !== prepared.restoreId) {
+          const maxRevision = Math.max(...ledger.entries.filter(e => e.id === prepared.restoreId).map(e => e.revision));
+          restored.id = prepared.restoreId; restored.revision = maxRevision + 1;
+        }
+      } else {
+        const c = ledger.candidates.find(c => c.id === id); if (c) { c.status = "approved"; c.result = result.message; }
+      }
+      await ledger.save();
+    });
+    return result;
   }
 
   // ─── System prompt injection (frozen snapshot) ───
@@ -703,6 +777,27 @@ export class MemoryStore {
       }
     }
     return undefined;
+  }
+
+  private matchesLookup(target: "memory" | "user" | "failure", raw: string, lookup: string): boolean {
+    const scope = currentWriteContext()?.failureProject;
+    if (target === "failure" && scope !== undefined && this.decodeEntry(raw).project !== scope) return false;
+    const selected = currentWriteContext()?.matchRaw;
+    return selected ? raw === selected : this.stripMetadata(raw).includes(lookup);
+  }
+
+  private collapseExactEntries(target: "memory" | "user" | "failure", entries: string[]): string[] {
+    const seen = new Set<string>();
+    return entries.filter(raw => {
+      const e = this.decodeEntry(raw);
+      const key = JSON.stringify([e.text, target === "failure" ? e.project : null]);
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+  }
+
+  private decodedEntries(target: "memory" | "user" | "failure"): Decoded[] {
+    return this.entriesFor(target).map(raw => ({ raw, ...this.decodeEntry(raw) }));
   }
 
   private areDistinctScopedFailureCopies(
@@ -884,6 +979,7 @@ export class MemoryStore {
     target: "memory" | "user" | "failure",
     mutation: (markMutation: () => void) => Promise<MemoryResult>,
     signal?: AbortSignal,
+    operations: MemoryMutationOperation[] = [],
   ): Promise<MemoryResult> {
     const storagePath = await this.resolveStoragePath(target);
     return withMarkdownMutationLock(storagePath, async () => {
@@ -893,6 +989,22 @@ export class MemoryStore {
         }
         let mutated = false;
         try {
+          await this.syncTargetFromDiskIfChanged(target);
+          const before = this.decodedEntries(target);
+          let admission: WriteAdmission | undefined;
+          if (this.admissionEnabled) {
+            for (const op of operations) {
+              const error = op.content ? scanContent(op.content) : null;
+              if (error) return { success: false, error };
+            }
+            admission = new WriteAdmission(storagePath + ".admission.json");
+            await admission.load();
+            admission.reconcile(before);
+            const decision = admission.preflight(before, operations);
+            if (!currentWriteContext()?.dryRun) await admission.save();
+            if (decision) return decision;
+            if (currentWriteContext()?.dryRun) return { success: true, message: "Dry run passed admission; no files changed." };
+          }
           const result = await mutation(() => {
             mutated = true;
           });
@@ -911,7 +1023,12 @@ export class MemoryStore {
             }
           }
           if (result.success && mutated) this.clearOverflow(target);
-          return await this.finalizeTargetMutation(target, storagePath, result);
+          const finalized = await this.finalizeTargetMutation(target, storagePath, result);
+          if (admission) {
+            admission.commit(before, this.decodedEntries(target), operations, finalized.success ? currentWriteContext()?.sources ?? [] : []);
+            await admission.save();
+          }
+          return finalized;
         } catch (error) {
           delete this.fileFingerprints[storagePath];
           const state = await this.readFileState(storagePath);

@@ -1,3 +1,4 @@
+import { registerMemoryReview } from "./tools/memory-review-tool.js";
 /**
  * Pi Hermes Memory Extension
  *
@@ -112,6 +113,7 @@ export default function (pi: ExtensionAPI) {
   let persistenceInitialized = false;
 
   const store = new MemoryStore({ ...config, memoryDir: globalDir });
+  store.setWriteAdmission();
   // Factory may run with no session (Pi public contract). Do not snapshot
   // project identity from process.cwd() here — bind from session_start ctx.cwd
   // and from tool execute ctx.cwd.
@@ -154,11 +156,13 @@ export default function (pi: ExtensionAPI) {
   // Bound from session/tool ctx.cwd, never from factory process.cwd().
   const createProjectStore = (projectInfo: ReturnType<typeof detectProject>): MemoryStore | null => {
     if (!projectInfo.memoryDir) return null;
-    return new MemoryStore({
+    const candidate = new MemoryStore({
       ...config,
       memoryCharLimit: config.projectCharLimit,
       memoryDir: projectInfo.memoryDir,
     });
+    candidate.setWriteAdmission();
+    return candidate;
   };
   let projectMemoryDir: string | null = null;
   let projectStore: MemoryStore | null = null;
@@ -305,6 +309,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, _ctx) => {
     const promptContext = await buildPromptContext(config, store, projectStoreRef(), projectNameRef(), standingStore, isMemoryChildProcess());
     if (!promptContext) return;
+    const admissionPolicy = "\nPersonal fork write policy: all writes pass admission. A pending candidate is NOT saved memory. Use memory_review to inspect active IDs, pending candidates and history. Ask for review only when a candidate exists; never approve/reject/restore on the user’s behalf without their explicit decision. Similarity does not prove equivalence: keep scope, device and conditions (e.g. S0/S4) distinct. Do not turn discussion, plans, assistant suggestions or task progress into user decisions. Automatic extraction proposes candidates only. Skills require an explicit user request. Existing legacy entries have unlinked provenance; do not fabricate sources.";
+
 
     // pi 0.86+ hands handlers a normalized clone of these options and re-renders
     // the prompt from it, so appending through `appendSystemPrompt` keeps the
@@ -320,19 +326,21 @@ export default function (pi: ExtensionAPI) {
     // 0.86+ runner normalizes `sections` onto the clone it passes.
     const promptOptions = event.systemPromptOptions;
     if (promptOptions && "sections" in promptOptions) {
-      promptOptions.appendSystemPrompt = [promptOptions.appendSystemPrompt, promptContext]
+      promptOptions.appendSystemPrompt = [promptOptions.appendSystemPrompt, promptContext + admissionPolicy]
         .filter(Boolean)
         .join("\n\n");
       return;
     }
 
     return {
-      systemPrompt: event.systemPrompt + "\n\n" + promptContext,
+      systemPrompt: event.systemPrompt + "\n\n" + promptContext + admissionPolicy,
     };
   });
 
   // ── 3. Register action-specific memory write tools with SQLite sync ──
   configureMemoryToolProjectStore = registerMemoryTool(memoryPi, store, projectStoreRef, dbManager, projectNameRef, bindProjectFromCwd);
+
+  registerMemoryReview(memoryPi, store, projectStoreRef, bindProjectFromCwd);
 
   // ── 4. Register the skill tool ──
   registerSkillTool(pi, skillStore);

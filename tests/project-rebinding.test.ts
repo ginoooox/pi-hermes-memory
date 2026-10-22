@@ -72,7 +72,7 @@ describe("session project memory rebinding", () => {
 
       const sessionCtx = {
         cwd: targetDir,
-        sessionManager: { getBranch: () => [] },
+        sessionManager: { getSessionId: () => "synthetic-project-session", getBranch: () => [{ type: "message", id: "user-request", message: { role: "user", content: "Remember: session-cwd write" } }] },
         ui: { notify() {} },
       };
 
@@ -89,7 +89,7 @@ describe("session project memory rebinding", () => {
         { target: "project", content: "session-cwd write" },
         undefined,
         undefined,
-        { cwd: targetDir },
+        sessionCtx,
       );
       assert.equal(writeResult.details.success, true);
 

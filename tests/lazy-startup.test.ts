@@ -120,7 +120,12 @@ describe("lazy startup lifecycle", () => {
       tools.memory_add.execute("write", { target: "project", content: "new durable project fact" }, undefined, undefined, ctx),
     ]);
     assert.equal(results[0].details.count, 2);
-    assert.equal(results[2].details.success, true);
+    assert.equal(results[2].details.pending, true, "Unverified first write is staged");
+    assert.equal((await search()).details.count, 2, "Pending fact is not searchable");
+    const id = results[2].details.candidate_id;
+    ctx.sessionManager.getSessionId = () => "synthetic-review-session";
+    ctx.sessionManager.getBranch = () => [{ type: "message", id: "approval-user", message: { role: "user", content: `approve ${id}` } }];
+    assert.equal((await tools.memory_review.execute("review", { action: "approve", target: "project", id }, undefined, undefined, ctx)).details.success, true);
     assert.equal(loads.mock.callCount(), 2, "one global and one project load");
     assert.equal((await search()).details.count, 3);
     assert.equal(loads.mock.callCount(), 2);

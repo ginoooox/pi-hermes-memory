@@ -333,10 +333,11 @@ export async function triggerConsolidation(
 ): Promise<ConsolidationResult> {
   const entries = entriesForTarget(store, target);
   const currentContent = entries.join(ENTRY_DELIMITER);
+  if (store.writeAdmissionEnabled && !directCtx) return { consolidated: false, error: "Automatic consolidation cannot write directly. Review and merge explicit candidates instead." };
   const runDirect = deps.runDirectMemoryCompletion ?? runDirectMemoryCompletion;
   const usageSignals = loadUsageSignals(dbManager, llmConfig, target, toolTarget, projectName);
 
-  if (directCtx && usesDirectTransport(llmConfig)) {
+  if (directCtx && (usesDirectTransport(llmConfig) || store.writeAdmissionEnabled)) {
     try {
       const directEntriesHeader = `--- Current ${labelForTarget(target, toolTarget)} Entries (target: '${toolTarget}') ---`;
       const directSignalsSection = usageSignalsSectionText(usageSignals, entries);
@@ -362,6 +363,7 @@ export async function triggerConsolidation(
         dbManager,
         projectName,
       );
+      if (directResult.pendingCount) return { consolidated: false, error: "Consolidation plan is pending user review; active memory unchanged." };
       // Consolidation only did its job if it actually freed space — unlike
       // review/flush/correction, an empty or fully-skipped result here is a
       // failure worth falling back to subprocess for, not a normal outcome.
@@ -387,6 +389,8 @@ export async function triggerConsolidation(
       // Fall through to subprocess below.
     }
   }
+
+    if (store.writeAdmissionEnabled) return { consolidated: false, error: "In-process consolidation did not produce an approved change; child fallback is disabled." };
 
     const chunkChars = chunkCharsFor(llmConfig);
     const chunkingEnabled = llmConfig.consolidationChunking === true;

@@ -106,12 +106,16 @@ describe("lazy memory automatic operations", () => {
   it("retries a pending correction without consuming its rate limit on initialization failure", async () => {
     const f = fixture();
     let attempts = 0;
+    let prompt = "";
     setupCorrectionDetector(f.pi, f.store, null, f.config, null, null, {
       ensureMemoryReady: async (ctx) => {
         if (++attempts === 1) throw new Error("transient load failure");
         await f.ensureMemoryReady(ctx);
       },
-      runDirectMemoryCompletion: f.runDirectMemoryCompletion,
+      runDirectMemoryCompletion: async (...args: any[]) => {
+        prompt = args[3].userPrompt;
+        return f.runDirectMemoryCompletion();
+      },
     });
     await f.emit("message_end", { message: { role: "user", content: "no, use pnpm" } });
     await f.emit("turn_end");
@@ -122,7 +126,7 @@ describe("lazy memory automatic operations", () => {
     await f.emit("turn_end");
     assert.equal(attempts, 2);
     assert.equal(f.calls(), 1);
-    assert.match(saved, /use pnpm/);
-    assert.doesNotMatch(saved, /continue with the work/);
+    assert.match(prompt, /User Correction to Save ---\nno, use pnpm/);
+    assert.equal(saved, "", "No raw append after direct extraction");
   });
 });

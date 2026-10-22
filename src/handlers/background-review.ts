@@ -272,7 +272,7 @@ export function setupBackgroundReview(
 
       let directFailure: string | undefined;
 
-      if (usesDirectTransport(config)) {
+      if (usesDirectTransport(config) || store.writeAdmissionEnabled) {
         try {
           const directResult = await runDirectReview(
             ctx,
@@ -295,6 +295,7 @@ export function setupBackgroundReview(
 
           if (sessionCancelled()) return;
 
+          if (directResult.pendingCount) ctx.ui.notify(`📝 ${directResult.pendingCount} memory proposal(s) awaiting review; active memory unchanged.`, "info");
           if (directResult.ok) {
             notifyIfSaved(shouldNotifyDirect(directResult));
             return;
@@ -314,6 +315,8 @@ export function setupBackgroundReview(
       }
 
       if (sessionCancelled()) return;
+
+      if (store.writeAdmissionEnabled) return; // No unsupervised Pi child can bypass admission.
 
       let subprocessResult: { code: number; stdout?: string; stderr?: string };
       try {

@@ -1,3 +1,4 @@
+import { contextFromSession, withWriteContext } from "../store/write-admission.js";
 /**
  * Parse and apply structured memory operations from direct background review.
  */
@@ -21,6 +22,7 @@ export interface ReviewMemoryOperation {
 export interface ApplyReviewOperationsResult {
   appliedCount: number;
   skippedCount: number;
+  pendingCount?: number;
   error?: string;
   aborted?: boolean;
 }
@@ -28,6 +30,7 @@ export interface ApplyReviewOperationsResult {
 export interface DirectReviewResult {
   ok: boolean;
   appliedCount: number;
+  pendingCount?: number;
   fallbackReason?: "no_model" | "no_auth" | "aborted" | "parse_error" | "provider_error" | "empty" | "empty_response";
   error?: string;
 }
@@ -583,6 +586,7 @@ export async function applyReviewOperations(
     if (options.signal?.aborted && !result.success) {
       return { appliedCount: 0, skippedCount: operations.length, aborted: true };
     }
+    if (result.pending) return { appliedCount: 0, skippedCount: operations.length, pendingCount: operations.length };
     return result.success
       ? { appliedCount: operations.length, skippedCount: 0 }
       : {
@@ -594,6 +598,7 @@ export async function applyReviewOperations(
 
   let appliedCount = 0;
   let skippedCount = 0;
+  let pendingCount = 0;
 
   for (let i = 0; i < operations.length; i++) {
     if (options.signal?.aborted) {
@@ -671,13 +676,14 @@ export async function applyReviewOperations(
         continue;
     }
 
+    if (result.pending) pendingCount++;
     if (options.signal?.aborted) {
       skippedCount += operations.length - i - 1;
       return { appliedCount, skippedCount, aborted: appliedCount === 0 };
     }
   }
 
-  return { appliedCount, skippedCount };
+  return { appliedCount, skippedCount, ...(pendingCount ? { pendingCount } : {}) };
 }
 
 /** Channel-aware text extraction: text blocks when present, otherwise the
@@ -943,7 +949,7 @@ export async function runDirectMemoryCompletion(
         return aborted();
       }
 
-      const applied = await applyReviewOperations(
+      const applied = await withWriteContext({ ...contextFromSession(ctx, "automatic"), requireShrink: options.requireAtomicShrink, failureProject: projectName ?? null }, () => applyReviewOperations(
         store,
         projectStore,
         operations,
@@ -954,7 +960,7 @@ export async function runDirectMemoryCompletion(
           expectedTarget: options.expectedTarget,
           signal: options.signal,
         },
-      );
+      ));
       if (applied.aborted && applied.appliedCount === 0) {
         return aborted();
       }
@@ -969,7 +975,7 @@ export async function runDirectMemoryCompletion(
         return lastResult;
       }
       clearTimeout(timeout);
-      return { ok: true, appliedCount: applied.appliedCount };
+      return { ok: true, appliedCount: applied.appliedCount, ...(applied.pendingCount ? { pendingCount: applied.pendingCount } : {}) };
     } catch (err) {
       if (options.signal?.aborted) {
         clearTimeout(timeout);

@@ -146,6 +146,11 @@ export type MemoryCategory =
   | "tool-quirk";
 
 export interface MemoryResult {
+  pending?: boolean;
+  candidate_id?: string;
+  duplicate?: boolean;
+  dry_run?: boolean;
+  preview?: unknown;
   success: boolean;
   error?: string;
   message?: string;

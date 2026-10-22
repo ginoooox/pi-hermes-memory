@@ -433,7 +433,12 @@ describe("setupCorrectionDetector handler", () => {
     await correctionStore.loadFromDisk();
     registerMemoryTool(pi, correctionStore, null, dbManager);
 
-    setupCorrectionDetector(pi, correctionStore, null, config, dbManager);
+    setupCorrectionDetector(pi, correctionStore, null, config, dbManager, null, {
+      runDirectMemoryCompletion: async () => {
+        await correctionStore.addFailure("use pnpm instead", { category: "correction" });
+        return { ok: true, appliedCount: 1 };
+      },
+    });
 
     const branch = [
       { type: "message", message: { role: "user", content: [{ type: "text", text: "no, use pnpm instead" }] } },
@@ -450,11 +455,17 @@ describe("setupCorrectionDetector handler", () => {
     assert.strictEqual(failures[0].project, null);
   });
 
-  it("saves the latest user message as the correction failure", async () => {
+  it("passes the latest correction to one extraction chain without a raw append", async () => {
     const pi = createMockPi();
     const correctionStore = new MemoryStore({ ...config, memoryDir: tmpDir } as any);
     await correctionStore.loadFromDisk();
-    setupCorrectionDetector(pi, correctionStore, null, config);
+    let correctionPrompt = "";
+    setupCorrectionDetector(pi, correctionStore, null, config, null, null, {
+      runDirectMemoryCompletion: async (_ctx, _store, _project, options) => {
+        correctionPrompt = options.userPrompt;
+        return { ok: true, appliedCount: 0 };
+      },
+    });
 
     const branch = [
       { type: "message", message: { role: "user", content: [{ type: "text", text: "First, use Maven for the build." }] } },
@@ -469,9 +480,8 @@ describe("setupCorrectionDetector handler", () => {
     await fireTurnEnd(branch);
 
     const failures = correctionStore.getFailureEntries();
-    assert.strictEqual(failures.length, 1);
-    assert.match(failures[0], /use javac only, not Maven/i);
-    assert.doesNotMatch(failures[0], /First, use Maven/i);
+    assert.strictEqual(failures.length, 0, "A model that saved nothing must not be followed by a raw correction append");
+    assert.match(correctionPrompt, /User Correction to Save ---\nNo, that is incorrect. Use javac only, not Maven/);
   });
 
   it("syncs project correction saves into SQLite with project scope", async () => {
@@ -483,7 +493,12 @@ describe("setupCorrectionDetector handler", () => {
     } as any;
     registerMemoryTool(pi, correctionStore, projectStore, dbManager, 'project-a');
 
-    setupCorrectionDetector(pi, correctionStore, projectStore, config, dbManager, 'project-a');
+    setupCorrectionDetector(pi, correctionStore, projectStore, config, dbManager, 'project-a', {
+      runDirectMemoryCompletion: async () => {
+        await correctionStore.addFailure("use pnpm in this repo", { category: "correction", project: "project-a" });
+        return { ok: true, appliedCount: 1 };
+      },
+    });
 
     const branch = [
       { type: "message", message: { role: "user", content: [{ type: "text", text: "no, use pnpm in this repo" }] } },
@@ -513,7 +528,12 @@ describe("setupCorrectionDetector handler", () => {
     } as unknown as DatabaseManager;
 
     registerMemoryTool(pi, correctionStore, null, failingDbManager);
-    setupCorrectionDetector(pi, correctionStore, null, config, failingDbManager);
+    setupCorrectionDetector(pi, correctionStore, null, config, failingDbManager, null, {
+      runDirectMemoryCompletion: async () => {
+        await correctionStore.addFailure("use yarn instead", { category: "correction" });
+        return { ok: true, appliedCount: 1 };
+      },
+    });
 
     const branch = [
       { type: "message", message: { role: "user", content: [{ type: "text", text: "no, use yarn instead" }] } },
@@ -523,7 +543,7 @@ describe("setupCorrectionDetector handler", () => {
     fireMessageEnd("user", "no, use yarn instead");
     await fireTurnEnd(branch);
 
-    assert.ok(execCalls.length >= 1, 'correction review should still run');
+    assert.strictEqual(execCalls.length, 0, 'successful direct review needs no second extraction chain');
     assert.strictEqual(correctionStore.getFailureEntries().length, 1, 'Markdown correction save should still happen');
   });
 

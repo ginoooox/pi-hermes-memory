@@ -59,8 +59,8 @@ export function registerLearnMemoryCommand(pi: ExtensionAPI): void {
         lines.push("  ║           🔧 Tools Available                 ║");
         lines.push("  ╚══════════════════════════════════════════════╝");
         lines.push("");
-        lines.push("  memory (add/replace/remove)");
-        lines.push("    Save, update, or delete memories");
+        lines.push("  memory_add / memory_replace / memory_remove");
+        lines.push("    Propose writes, or save explicit verified memory directives");
         lines.push("    Targets: memory, user, failure, project");
         lines.push("");
         lines.push("  skill_manage (create/view/patch/update/delete)");
@@ -81,7 +81,8 @@ export function registerLearnMemoryCommand(pi: ExtensionAPI): void {
         lines.push("  ║             📋 Commands                      ║");
         lines.push("  ╚══════════════════════════════════════════════╝");
         lines.push("");
-        lines.push("  /memory-insights      Show everything stored in memory");
+        lines.push("  /memory-review        Inspect and decide pending proposals");
+        lines.push("  /memory-insights      Show active memory");
         lines.push("  /memory-skills        List all saved skills");
         lines.push("  /memory-consolidate   Manually trigger memory cleanup");
         lines.push("  /memory-interview     Answer questions to pre-fill profile");
@@ -118,12 +119,12 @@ export function registerLearnMemoryCommand(pi: ExtensionAPI): void {
         lines.push("");
         lines.push("  1. Session starts     → Compact memory policy is injected");
         lines.push("  2. During conversation → Agent searches memory when useful");
-        lines.push("  3. Agent saves        → Markdown memory + best-effort SQLite sync");
-        lines.push("  4. Every 10 turns     → Background review saves items");
-        lines.push("  5. On correction      → Immediate save as [correction] category");
-        lines.push("  6. On failure         → Saves what failed + why");
-        lines.push("  7. When full          → Auto-consolidation merges");
-        lines.push("  8. Session ends       → Final flush");
+        lines.push("  3. Agent proposes     → Admission checks source and duplicates");
+        lines.push("  4. Every 10 turns     → Background review proposes candidates");
+        lines.push("  5. On correction      → One reviewed proposal chain");
+        lines.push("  6. User approves      → Active Markdown + SQLite recall");
+        lines.push("  7. Replaced/removed   → Prior revisions remain restorable");
+        lines.push("  8. Session ends       → Final candidate extraction");
         lines.push("");
         lines.push("  Legacy mode: set memoryMode=\"legacy-inject\" to restore full");
         lines.push("  MEMORY.md, USER.md, project memory, and failure prompt blocks.");
@@ -175,7 +176,7 @@ export function registerLearnMemoryCommand(pi: ExtensionAPI): void {
         lines.push("    → Check /memory-insights, tell agent \"remember X\"");
         lines.push("");
         lines.push("  \"Want to edit manually\"");
-        lines.push("    → Files at ~/.pi/agent/memory/ (plain markdown)");
+        lines.push("    → Files at ~/.pi/agent/pi-hermes-memory/ (plain markdown)");
       }
 
       if (lines.length > 0) {

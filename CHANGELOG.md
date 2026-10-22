@@ -1,3 +1,13 @@
+## [0.9.11-personal.1] - 2026-10-22
+
+- Route extension-managed writes through locked admission; stage automatic and unverified writes for review.
+- Add stable IDs, revision history, verified session source links, dry-run and user-controlled review/restore.
+- Fix exact duplicates created by replace/atomic replacement; preserve project-attributed failure copies.
+- Add CJK candidate retrieval and optional advisory semantic analysis without automatic merges.
+- Remove correction double capture and writing-child fallbacks; retain manual consolidation as reviewed shrink plans.
+- Validate on Pi 1.3.0 in Windows WSL; keep unchanged ARMv7 runtime dependencies.
+- Disable fork Actions in GitHub repository settings to prevent inherited npm publishing.
+
 # Changelog
 
 All notable changes to this project will be documented in this file.

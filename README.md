@@ -1,3 +1,5 @@
+> **Personal fork — 0.9.11-personal.1.** Based on upstream v0.9.11. Automatic extraction now stages reviewable candidates; stable IDs, source links, scoped duplicate handling and reversible revisions protect active memory. See [personal release behavior and review commands](docs/PERSONAL-MEMORY-QUALITY.md) and [upstream merge procedure](docs/FORK-MAINTENANCE.md). The upstream README below describes the original project; its automatic-write defaults are overridden in this fork. Install a reviewed personal tag/commit from this GitHub fork; it is not published as the author's npm release.
+
 <div align="center">
 
 ![Pi Hermes Memory](docs/images/pi_memory.png)

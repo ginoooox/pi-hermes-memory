@@ -1,3 +1,4 @@
+import { contextFromSession, withWriteContext } from "../store/write-admission.js";
 /**
  * Memory write tools — registers the LLM-callable memory_add, memory_replace,
  * and memory_remove tools.
@@ -275,6 +276,8 @@ type MemoryToolParams = {
   target: "memory" | "user" | "project" | "failure";
   content?: string;
   old_text?: string;
+  entry_id?: string;
+  expected_revision?: number;
   category?: MemoryCategory;
   failure_reason?: string;
 };
@@ -308,8 +311,8 @@ export function registerMemoryTool(
   if (typeof pi.on === "function") {
     pi.on("tool_result", (event) => {
       if (!event.toolName.startsWith("memory_")) return;
-      const details = event.details as { success?: unknown } | undefined;
-      if (details?.success === false) return { isError: true };
+      const details = event.details as { success?: unknown; pending?: boolean } | undefined;
+      if (details?.success === false && !details.pending) return { isError: true };
     });
   }
 
@@ -317,8 +320,9 @@ export function registerMemoryTool(
     action: MemoryAction,
     params: MemoryToolParams,
     signal?: AbortSignal,
-  ) => {
-    const { target: rawTarget, content, old_text, category, failure_reason } = params;
+  ): Promise<any> => {
+    const { target: rawTarget, content, category, failure_reason } = params;
+    let { old_text } = params;
     const target = rawTarget === "project" ? "memory" : rawTarget;
     const activeProjectStore = resolveProjectStore(projectStore);
     const activeProjectName = resolveProjectName(projectName);
@@ -342,6 +346,21 @@ export function registerMemoryTool(
 
     const store_ = activeStore!;
     attachMutationObserver(store_);
+    if (params.entry_id && action !== "add") {
+      const listing = await store_.reviewAdmission(target, "active", params.entry_id);
+      const entry = listing.entries?.find((e: any) => e.id === params.entry_id);
+      if (!entry || (params.expected_revision !== undefined && entry.revision !== params.expected_revision)) {
+        const failure = { success: false, error: "Stable id/revision not active. Inspect memory_review active." };
+        return { content: [{ type: "text" as const, text: JSON.stringify(failure) }], details: failure };
+      }
+      // The store checks the exact raw entry again while holding its mutation lock.
+      old_text = entry.text;
+      const base = contextFromSession(undefined);
+      const { currentWriteContext } = await import("../store/write-admission.js");
+      const inherited = currentWriteContext() ?? base;
+      return withWriteContext({ ...inherited, matchRaw: entry.raw }, () => executeAction(action,
+        { ...params, entry_id: undefined, old_text }, signal));
+    }
     let result: MemoryResult;
     let syncWarning: string | null = null;
     const syncHandled = reconciledStores.has(store_);
@@ -425,11 +444,11 @@ This action-specific tool accepts only the parameters listed in its schema.`;
       ],
       renderResult: createSharedToolResultRenderer(memoryResultView),
       parameters,
-      async execute(_toolCallId, params, signal, _onUpdate, ctx?: { cwd?: string }) {
+      async execute(_toolCallId, params, signal, _onUpdate, ctx?: { cwd?: string; sessionManager?: any }) {
         if (bindProjectFromCwd && ctx?.cwd) {
           await bindProjectFromCwd(ctx.cwd);
         }
-        return executeAction(action, params as MemoryToolParams, signal);
+        return withWriteContext(contextFromSession(ctx), () => executeAction(action, params as MemoryToolParams, signal));
       },
     });
   };
@@ -467,9 +486,11 @@ Add one durable entry. The target and content fields are required.`,
 Replace one existing entry. The target, old_text, and content fields are required.`,
     Type.Object({
       target,
-      old_text: Type.String({ description: "Substring identifying the entry to replace." }),
+      old_text: Type.Optional(Type.String({ description: "Substring identifying the entry to replace; prefer entry_id." })),
+      entry_id: Type.Optional(Type.String({ description: "Stable active entry id from memory_review." })),
+      expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
       content: Type.String({ description: "Replacement entry content." }),
-    }),
+    }, { anyOf: [{ required: ["old_text"] }, { required: ["entry_id"] }] }),
   );
   registerActionTool(
     "remove",
@@ -480,8 +501,10 @@ Replace one existing entry. The target, old_text, and content fields are require
 Remove one existing entry. The target and old_text fields are required.`,
     Type.Object({
       target,
-      old_text: Type.String({ description: "Substring identifying the entry to remove." }),
-    }),
+      old_text: Type.Optional(Type.String({ description: "Substring identifying the entry to remove; prefer entry_id." })),
+      entry_id: Type.Optional(Type.String()),
+      expected_revision: Type.Optional(Type.Integer({ minimum: 1 })),
+    }, { anyOf: [{ required: ["old_text"] }, { required: ["entry_id"] }] }),
   );
   return configureProjectStore;
 }

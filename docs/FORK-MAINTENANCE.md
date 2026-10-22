@@ -35,3 +35,15 @@
 ## Verification gates
 
 Exact and paraphrased duplicates, correction double capture, S0/S4 conditional separation, tentative discussion versus confirmed decision, rejected-candidate recurrence, source-role validation, stale concurrent update, Markdown/SQLite consistency, legacy migration and restore must have regression coverage. A package version or direct API test alone does not prove a running Pi loaded the change.
+
+## Personal release validation
+
+`0.9.11-personal.1` was validated in Windows WSL with Node 22.23.4 and Pi SDK 1.3.0: 61 isolated test files, 1,171 tests, all passed; TypeScript check; minimum SDK 0.80.6 check; production installation check with Pi jiti and four loopback direct completions. Tests use synthetic fixtures. This validates the code and package; target ARMv7 loading and the live instance are separate deployment checks.
+
+See [release behavior, limitations and rollback](PERSONAL-MEMORY-QUALITY.md). The canonical active facts stay in Markdown; the new sidecar retains pending proposals and revisions. There is no automatic semantic merge. Future upstream integration must preserve these quality regressions before advancing the production pin.
+
+## Workflow authorization and fork release protection
+
+The current GitHub OAuth login has repository access but no workflow-file scope. This release therefore preserves inherited workflow files. The new fork did not yet register individual workflows with the Actions API, so repository-wide Actions were disabled and verified with `GET /repos/ginoooox/pi-hermes-memory/actions/permissions` (`enabled: false`) before publishing. Local WSL validations are the release gate; GitHub CI does not currently run. No upstream PR is created or main branch modified.
+
+`PERSONAL-WORKFLOW-GUARDS.patch` is the reviewed optional patch adding explicit upstream-only publish guards and personal-branch CI. Apply using `git apply --unidiff-zero docs/PERSONAL-WORKFLOW-GUARDS.patch`. Applying it requires a future authorized credential with workflow scope; it is not already active. Add these protections before re-enabling Actions. Confirm the Actions setting after each upstream integration and before every tag.
