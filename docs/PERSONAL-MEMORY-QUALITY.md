@@ -1,4 +1,4 @@
-# Personal memory quality — 0.9.11-personal.1
+# Personal memory quality — 0.9.11-personal.2
 
 This release is based on upstream v0.9.11. It preserves the Markdown/SQLite storage layout and adds an admission ledger to extension-managed memory mutations. It introduces no resident service and no vector database.
 
@@ -53,3 +53,7 @@ Before deployment, back up settings, Markdown, ledgers and a consistent SQLite s
 Disk deployment and a running process loading it are separate checks. A package version alone is not evidence that the active Pi loaded the release. Reload at an appropriate session boundary, then verify memory_review is registered and use synthetic, isolated checks for the target platform. No second Pi/RPC process is permitted on OneCloud.
 
 Rollback the package source to npm:pi-hermes-memory@0.9.11 and reload; admission ledgers can be kept for investigation because upstream ignores them. This restores the old extraction behavior, including automatic writes. Never restore an old database over newer user records merely to roll back code. Restore data only deliberately from the corresponding snapshot and reconcile Markdown/search afterward.
+
+## Live runtime evidence (personal.2)
+
+`runtime-status.json` in the global memory directory is written atomically by the actual session_start hook. It records the literal loaded release version, import source URL, namespace PID, loadedAt and readiness flags, with mode 0600 and no memory/message content. Validate its freshness, source path and still-running main Pi process before treating it as proof. A factory-only load does not create it; a failed status write warns without breaking memory tools. The marker may survive a process exit, so a stale file alone is not proof of a running version.

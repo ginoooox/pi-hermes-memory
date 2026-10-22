@@ -1,3 +1,8 @@
+## [0.9.11-personal.2] - 2026-10-22
+
+- Record a content-free local runtime status only after the actual session start hook completes, so deployment can verify the loaded process separately from the package on disk.
+- Preserve personal.1 admission behavior and unchanged runtime dependencies.
+
 ## [0.9.11-personal.1] - 2026-10-22
 
 - Route extension-managed writes through locked admission; stage automatic and unverified writes for review.

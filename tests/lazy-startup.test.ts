@@ -89,6 +89,24 @@ after(async () => {
 });
 
 describe("lazy startup lifecycle", () => {
+  it("acknowledges actual session loading without exposing facts or forcing the lazy DB", async () => {
+    const statusFile = path.join(globalDir, "runtime-status.json");
+    register();
+    assert.equal(existsSync(statusFile), false);
+    const started = Date.now();
+    await emit("session_start");
+    const raw = await fs.readFile(statusFile, "utf8");
+    const status = JSON.parse(raw);
+    assert.equal(status.version, "0.9.11-personal.2");
+    assert.equal(status.pid, process.pid);
+    assert.ok(Date.parse(status.loadedAt) >= started);
+    assert.match(status.source, /src\/index\.(ts|js)$/);
+    assert.equal(status.admissionEnabled, true);
+    assert.equal(status.memoryReady, false);
+    assert.equal(existsSync(path.join(globalDir, "sessions.db")), false);
+    assert.equal((await fs.stat(statusFile)).mode & 0o777, 0o600);
+    assert.doesNotMatch(raw, /durable global fact|durable project fact/);
+  });
   it("keeps generic conversation, skills, preview and cold shutdown free of memory/DB loading", async (t) => {
     const loads = t.mock.method(MemoryStore.prototype, "loadFromDisk");
     const opens = t.mock.method(DatabaseManager.prototype, "getDb");

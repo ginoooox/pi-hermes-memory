@@ -301,6 +301,24 @@ export default function (pi: ExtensionAPI) {
     refreshSkillProjectContext(ctx.cwd);
     await skillStore.migrateLegacySkills();
     await skillStore.ensureDiscoveredRoots();
+    // A disk package version cannot prove that the live session loaded it.
+    // This local diagnostic deliberately contains no memory or message text.
+    try {
+      fs.mkdirSync(globalDir, { recursive: true, mode: 0o700 });
+      const statusPath = path.join(globalDir, "runtime-status.json");
+      const temporaryPath = `${statusPath}.${process.pid}.tmp`;
+      fs.writeFileSync(temporaryPath, JSON.stringify({
+        version: "0.9.11-personal.2",
+        loadedAt: new Date().toISOString(),
+        pid: process.pid,
+        source: import.meta.url,
+        admissionEnabled: store.writeAdmissionEnabled,
+        memoryReady: initialization.isReady(),
+      }, null, 2) + "\n", { mode: 0o600 });
+      fs.renameSync(temporaryPath, statusPath);
+    } catch (error) {
+      console.warn(`Memory runtime status unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
   });
 
   registerProjectSkillDiscoveryHandler(pi, skillStore, config.projectsMemoryDir);
