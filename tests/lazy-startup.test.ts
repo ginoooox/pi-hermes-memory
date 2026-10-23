@@ -97,7 +97,7 @@ describe("lazy startup lifecycle", () => {
     await emit("session_start");
     const raw = await fs.readFile(statusFile, "utf8");
     const status = JSON.parse(raw);
-    assert.equal(status.version, "0.9.11-personal.2");
+    assert.equal(status.version, JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8")).version);
     assert.equal(status.pid, process.pid);
     assert.ok(Date.parse(status.loadedAt) >= started);
     assert.match(status.source, /src\/index\.(ts|js)$/);

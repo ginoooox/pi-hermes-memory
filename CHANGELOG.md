@@ -1,3 +1,8 @@
+## 0.9.11-personal.4
+
+- Correct the runtime version marker left at personal.2 in personal.3 and add package-version parity regression coverage.
+- Preserve personal.3 review insights and unchanged admission policy.
+
 ## 0.9.11-personal.3
 
 - Add bounded read-only candidate groups, deduplicated source evidence and explicit-ID deletion impact previews for ledger and skill references.
@@ -20,6 +25,11 @@
 - Disable fork Actions in GitHub repository settings to prevent inherited npm publishing.
 
 # Changelog
+
+## 0.9.11-personal.4 (personal fork)
+
+- Correct the live runtime version marker left at personal.2 by personal.3; add release-version parity regression coverage. No admission policy change.
+
 
 All notable changes to this project will be documented in this file.
 

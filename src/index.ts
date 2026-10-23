@@ -308,7 +308,7 @@ export default function (pi: ExtensionAPI) {
       const statusPath = path.join(globalDir, "runtime-status.json");
       const temporaryPath = `${statusPath}.${process.pid}.tmp`;
       fs.writeFileSync(temporaryPath, JSON.stringify({
-        version: "0.9.11-personal.2",
+        version: "0.9.11-personal.4",
         loadedAt: new Date().toISOString(),
         pid: process.pid,
         source: import.meta.url,

@@ -78,3 +78,10 @@ test("group results retain source IDs without repeating long source excerpts",()
  const c=candidate("a","short fact");c.sources=[{...source,text:"x".repeat(2500)}];
  const r=candidateGroups([c],[],[],10,0);assert.ok(JSON.stringify(r).length<3000);assert.equal(r.groups[0].evidence.source_ids[0].messageId,"u1");
 });
+
+test("runtime status reports the released package version",async()=>{
+ const fs=await import("node:fs/promises");
+ const pkg=JSON.parse(await fs.readFile(new URL("../../package.json",import.meta.url),"utf8"));
+ const source=await fs.readFile(new URL("../../src/index.ts",import.meta.url),"utf8");
+ assert.ok(source.includes(`version: "${pkg.version}"`));
+});
