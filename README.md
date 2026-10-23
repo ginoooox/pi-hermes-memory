@@ -755,3 +755,7 @@ MIT
 ---
 
 **[Full Roadmap →](docs/ROADMAP.md)** · **[Changelog →](CHANGELOG.md)**
+
+### Personal fork review projections (personal.3)
+
+`/memory-review groups TARGET` groups pending additions within the same ledger/project scope and recomputes current active matches and stale fingerprints. It does not merge or approve. `/memory-review evidence TARGET ID` shows deduplicated source-message associations; repeated excerpts count once and source text is not proof of entailment. `/memory-review impact TARGET ENTRY_ID` previews explicit stable-ID references in the same ledger and bounded direct skill roots. It does not infer a complete dependency graph or invalidate anything automatically. Targets: `user`, `memory`, `project`, `failure`. The tool supports `limit`/`offset` for group/reference pages. Exact-ID user authorization remains required for all review decisions.

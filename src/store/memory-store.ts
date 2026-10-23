@@ -38,6 +38,7 @@ import type {
 import { AGENT_ROOT } from "../paths.js";
 import { canonicalMarkdownIdentity, withMarkdownMutationLock } from "./markdown-mutation-lock.js";
 
+import { candidateGroups, candidateAssessment, entryImpact, sourceEvidence, skillReferences } from "./review-insights.js";
 import { WriteAdmission, currentWriteContext, withWriteContext, fingerprint, type Decoded } from "./write-admission.js";
 
 const MAX_EXTERNAL_WRITE_RETRIES = 2;
@@ -597,16 +598,32 @@ export class MemoryStore {
   }
 
   /** Review/restore uses stable ids and an optimistic fingerprint under the mutation lock. */
-  async reviewAdmission(target: "memory" | "user" | "failure", action: "list" | "active" | "history" | "show" | "approve" | "reject" | "restore" | "duplicate", id?: string,
+  async reviewAdmission(target: "memory" | "user" | "failure", action: "list" | "active" | "history" | "show" | "approve" | "reject" | "restore" | "duplicate" | "groups" | "evidence" | "impact", id?: string,
     options: { replaceId?: string; revision?: number; signal?: AbortSignal; limit?: number; offset?: number } = {}): Promise<any> {
     if (!this.admissionEnabled) return { success: false, error: "Write admission is disabled." };
     const storagePath = await this.resolveStoragePath(target);
     const prepared = await withMarkdownMutationLock(storagePath, async () => {
       await this.syncTargetFromDiskIfChanged(target);
       const ledger = new WriteAdmission(storagePath + ".admission.json");
-      await ledger.load(); ledger.reconcile(this.decodedEntries(target)); await ledger.save();
+      await ledger.load(); ledger.reconcile(this.decodedEntries(target));
+      // New projections do not persist reconciliation or modify admission state.
+      if (!["groups", "evidence", "impact"].includes(action)) await ledger.save();
       const limit = Math.max(1, Math.min(100, Math.trunc(options.limit ?? 30)));
       const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+      if (action === "groups") return { done: true, result: candidateGroups(ledger.candidates, ledger.entries, this.entriesFor(target), limit, offset) };
+      if (action === "evidence" || action === "impact") {
+        const candidate = ledger.candidates.find(c => c.id === id);
+        const entry = ledger.entries.filter(e => e.id === id).sort((a,b) => b.revision-a.revision)[0];
+        if (action === "evidence") {
+          if (!candidate && !entry) return { done:true, result:{success:false,error:"Candidate/entry id not found."} };
+          return { done:true, result:{success:true, advisory_only:true, id,
+            evidence:sourceEvidence(candidate?.sources ?? entry!.source),
+            ...(candidate ? {assessment:candidateAssessment(candidate,ledger.entries,this.entriesFor(target))} : {revision:entry!.revision,status:entry!.status,source_status:entry!.sourceStatus})} };
+        }
+        if (!entry) return {done:true,result:{success:false,error:"Entry id not found; impact requires a stable entry id."}};
+        return { done:true, result:{...entryImpact(entry,ledger.entries,ledger.candidates,limit,offset),
+          skills:await skillReferences([path.join(path.dirname(storagePath),"skills"),path.join(AGENT_ROOT,"skills")],entry.id)} };
+      }
       if (action === "active" || action === "history") {
         const entries = ledger.entries.filter(e => (action === "history" || e.status === "active") && (!id || e.id === id));
         return { done: true, result: { success: true, total: entries.length, offset, entries: entries.slice(offset, offset + limit) } };

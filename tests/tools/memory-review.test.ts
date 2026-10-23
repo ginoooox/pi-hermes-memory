@@ -90,3 +90,10 @@ test("automatic paths never fall back to a Pi child when admission is enabled",a
   await emit("turn_end",{});await settled.promise;await emit("session_before_compact",{});
   assert.equal(children,0);
 });
+
+test("new review projections route read-only and cannot authorize a decision",async t=>{
+ const {store,call,tools}=await fixture(t);const c=await store.add("user","Tentative fixture preference");
+ for(const action of ["groups","evidence"]){const r=await call("memory_review",{action,target:"user",id:c.candidate_id},"Inspect the queue");assert.equal(r.success,true);assert.equal(r.advisory_only,true);}
+ assert.equal((await call("memory_review",{action:"approve",target:"user",id:c.candidate_id},"Organize all pending memories")).success,false);
+ assert.deepEqual(store.getUserEntries(),[]);assert.match(tools.memory_review.description,/not a complete dependency graph/);
+});

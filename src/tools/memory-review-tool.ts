@@ -25,7 +25,8 @@ export function registerMemoryReview(pi: ExtensionAPI, store: MemoryStore,
     if (params.action === "analyze") {
       const viewed = await active.reviewAdmission(params.target === "project" ? "memory" : params.target, "show", params.id);
       if (!viewed.success) return viewed;
-      const candidate = viewed.candidate;
+      const current = await active.reviewAdmission(params.target === "project" ? "memory" : params.target, "evidence", params.id);
+      const candidate = { ...viewed.candidate, similar: current.assessment?.related_active ?? [], evidence: current.evidence, assessment: current.assessment };
       const model = ctx.model;
       if (!model) return { success: false, error: "No model available; candidate remains pending." };
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -53,10 +54,10 @@ export function registerMemoryReview(pi: ExtensionAPI, store: MemoryStore,
   };
   pi.registerTool({
     name: "memory_review", label: "Memory Review",
-    description: "Inspect pending memory candidates, verified session sources, active stable IDs and superseded revisions. list/show/active/history are read-only; analyze asks the active model for bounded semantic advice without approving anything. User-authorized approve/reject/duplicate/restore need an explicit user decision referencing the exact id; do not self-approve. approve with replace_id merges a single add into that active entry, preserving its old revision; duplicate with replace_id discards an equivalent proposal. Similarity is only a candidate signal. A stale proposal must be resubmitted. Pending/superseded content is excluded from ordinary recall.",
+    description: "Inspect pending memory candidates, verified session sources, active stable IDs and superseded revisions. list/show/active/history inspect the ledger; groups/evidence/impact are bounded read-only projections. groups recomputes current same-scope relations and stale flags; evidence deduplicates source-message associations without treating them as proof; impact checks explicit ID references in this ledger and bounded skill roots, not a complete dependency graph; analyze asks the active model for bounded semantic advice without approving anything. User-authorized approve/reject/duplicate/restore need an explicit user decision referencing the exact id; do not self-approve. approve with replace_id merges a single add into that active entry, preserving its old revision; duplicate with replace_id discards an equivalent proposal. Similarity is only a candidate signal. A stale proposal must be resubmitted. Pending/superseded content is excluded from ordinary recall.",
     parameters: Type.Object({
       target: StringEnum(["memory", "user", "project", "failure"]),
-      action: StringEnum(["list", "show", "active", "history", "analyze", "dry_run", "approve", "reject", "duplicate", "restore"]),
+      action: StringEnum(["list", "show", "active", "history", "groups", "evidence", "impact", "analyze", "dry_run", "approve", "reject", "duplicate", "restore"]),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })), offset: Type.Optional(Type.Integer({ minimum: 0 })),
       id: Type.Optional(Type.String()), replace_id: Type.Optional(Type.String()),
       revision: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -69,10 +70,10 @@ export function registerMemoryReview(pi: ExtensionAPI, store: MemoryStore,
     },
   });
   pi.registerCommand("memory-review", {
-    description: "Memory admission: list|active|history|show|approve|reject|duplicate|restore TARGET [ID] [REPLACE_ID]",
+    description: "Memory admission: list|groups|evidence|impact|active|history|show|approve|reject|duplicate|restore TARGET [ID] [REPLACE_ID]",
     handler: async (args, ctx) => {
       const [action = "list", target = "user", id, replace_id] = args.trim().split(/\s+/);
-      if (!["memory","user","project","failure"].includes(target) || !["list","show","active","history","analyze","approve","reject","duplicate","restore"].includes(action)) {
+      if (!["memory","user","project","failure"].includes(target) || !["list","show","active","history","groups","evidence","impact","analyze","approve","reject","duplicate","restore"].includes(action)) {
         ctx.ui.notify("Usage: /memory-review ACTION TARGET [ID] [REPLACE_ID]", "error"); return;
       }
       const result = await perform({ action, target, id, replace_id }, ctx, ctx.signal, true);

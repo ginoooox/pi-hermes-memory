@@ -1,3 +1,9 @@
+## 0.9.11-personal.3
+
+- Add bounded read-only candidate groups, deduplicated source evidence and explicit-ID deletion impact previews for ledger and skill references.
+- Recompute current active relations and stale fingerprints for semantic review rather than relying on creation-time similarity.
+- Preserve independent candidate decisions, scope isolation, unlinked legacy provenance and existing admission safeguards.
+
 ## [0.9.11-personal.2] - 2026-10-22
 
 - Record a content-free local runtime status only after the actual session start hook completes, so deployment can verify the loaded process separately from the package on disk.
