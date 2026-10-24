@@ -190,6 +190,7 @@ export default function (pi: ExtensionAPI) {
     }
     await projectLoad;
     projectName = nextProject.name ?? "";
+    store.setReviewSkillRoots(projectMemoryDir ? [path.join(projectMemoryDir,"skills")] : []);
   };
   // Never written by review, consolidation or the correction detector — see
   // store/standing-instructions.ts for why provenance has to be structural.
@@ -308,7 +309,7 @@ export default function (pi: ExtensionAPI) {
       const statusPath = path.join(globalDir, "runtime-status.json");
       const temporaryPath = `${statusPath}.${process.pid}.tmp`;
       fs.writeFileSync(temporaryPath, JSON.stringify({
-        version: "0.9.11-personal.4",
+        version: "0.9.11-personal.5",
         loadedAt: new Date().toISOString(),
         pid: process.pid,
         source: import.meta.url,
@@ -327,7 +328,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, _ctx) => {
     const promptContext = await buildPromptContext(config, store, projectStoreRef(), projectNameRef(), standingStore, isMemoryChildProcess());
     if (!promptContext) return;
-    const admissionPolicy = "\nPersonal fork write policy: all writes pass admission. A pending candidate is NOT saved memory. Use memory_review to inspect active IDs, pending candidates and history. Ask for review only when a candidate exists; never approve/reject/restore on the user’s behalf without their explicit decision. Similarity does not prove equivalence: keep scope, device and conditions (e.g. S0/S4) distinct. Do not turn discussion, plans, assistant suggestions or task progress into user decisions. Automatic extraction proposes candidates only. Skills require an explicit user request. Existing legacy entries have unlinked provenance; do not fabricate sources.";
+    const admissionPolicy = "\nPersonal fork write policy: all writes pass admission. A pending candidate is NOT saved memory. Use memory_review to inspect active IDs, pending candidates and history. Ask for review only when a candidate exists; never approve/reject/restore on the user’s behalf without their explicit decision. Similarity does not prove equivalence: keep scope, device and conditions (e.g. S0/S4) distinct. Do not turn discussion, plans, assistant suggestions or task progress into user decisions. Automatic extraction proposes candidates only. Read candidate source_selection and quality before review; later related messages and skill matches require semantic inspection, never an automatic decision. Broad category filters can hide ordinary project memories; retry a no-hit search without unnecessary category restrictions. Skills require an explicit user request. Existing legacy entries have unlinked provenance; do not fabricate sources.";
 
 
     // pi 0.86+ hands handlers a normalized clone of these options and re-renders
@@ -368,6 +369,18 @@ export default function (pi: ExtensionAPI) {
     dbManager,
     projectName: projectNameRef,
     ensureMemoryReady,
+  });
+
+  // Advisory quality refresh after each completed agent run, without an extra model call.
+  pi.on("agent_end", async (_event, ctx) => {
+    if (!initialization.isReady() || isMemoryChildProcess()) return;
+    const { contextFromSession } = await import("./store/write-admission.js");
+    const sourceContext=contextFromSession(ctx);
+    const sources=sourceContext.sourcePool??sourceContext.sources;
+    try {
+      await store.recheckPendingQuality(sources);
+      await projectStoreRef()?.recheckPendingQuality(sources);
+    } catch (error) { console.warn(`Memory candidate quality recheck failed: ${error instanceof Error?error.message:String(error)}`); }
   });
 
   // ── 6. Setup session-end flush ──

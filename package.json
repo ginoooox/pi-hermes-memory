@@ -1,6 +1,6 @@
 {
   "name": "pi-hermes-memory",
-  "version": "0.9.11-personal.4",
+  "version": "0.9.11-personal.5",
   "description": "Personal Pi memory fork: reviewed automatic proposals, source links, stable IDs, scoped deduplication and reversible history",
   "type": "module",
   "main": "src/index.ts",

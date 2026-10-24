@@ -1,3 +1,4 @@
+import { selectProposalSources, type pendingQuality } from "./proposal-quality.js";
 import { scanContent } from "./content-scanner.js";
 /** Personal fork admission ledger. Markdown remains the active source of truth.
  * Each ledger is serialized by the SAME lock as its Markdown target. */
@@ -13,6 +14,7 @@ export type AdmissionSource = {
 export type WriteContext = {
   origin: "foreground" | "automatic" | "approval";
   sources: AdmissionSource[];
+  sourcePool?: AdmissionSource[];
   explicit?: boolean;
   candidateId?: string;
   expectedFingerprint?: string;
@@ -39,13 +41,19 @@ export function contextFromSession(ctx: any, origin: WriteContext["origin"] = "f
       const text = typeof m.content === "string" ? m.content : Array.isArray(m.content)
         ? m.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n") : "";
       if (text.trim()) sources.push({ sessionId, messageId: entry.id, role: m.role,
-        timestamp: entry.timestamp, text: text.slice(0, 2500) });
+        timestamp: entry.timestamp, text: text.slice(0, 6000) });
     }
   } catch { /* Missing branch means unverified; writes must stay pending. */ }
   const recent = [...sources.filter(s => s.role === "user").slice(-3), ...sources.filter(s => s.role === "toolResult").slice(-3)];
   const user = recent.filter(s => s.role === "user").at(-1)?.text ?? "";
   const explicit = /^(?:\[telegram\]\s*)?(?:(?:请|帮我|替我|你要|以后要|please|can you)\s*)?(?:记住|记下来|保存.{0,12}(?:记忆|偏好)|更新.{0,12}记忆|删除.{0,12}记忆|整理.{0,12}记忆|remember\b|save (?:this|that|my).{0,20}(?:memory|preference)|update.{0,12}memor|forget\b)/iu.test(user.trim());
-  return { origin, sources: recent, explicit };
+  let remaining = 96000;
+  const pool: AdmissionSource[] = [];
+  for (const source of sources.slice(-96).reverse()) {
+    if (source.text.length > remaining) break;
+    pool.unshift(source); remaining -= source.text.length;
+  }
+  return { origin, sources: recent, sourcePool: pool, explicit };
 }
 export function explicitReviewRequest(ctx: any, id: string): boolean {
   const user = contextFromSession(ctx).sources.filter(s => s.role === "user").at(-1)?.text ?? "";
@@ -59,6 +67,8 @@ export type Candidate = { id: string; key: string; operations: MemoryMutationOpe
   status: "pending" | "approved" | "rejected" | "duplicate";
   reason: string; fingerprint: string; sources: AdmissionSource[]; createdAt: string;
   similar: Array<{ id: string; text: string; score: number; project: string | null }>;
+  sourceSelection?: ReturnType<typeof selectProposalSources>["selection"];
+  quality?: ReturnType<typeof pendingQuality>;
   result?: string; matchRaw?: string; requireShrink?: boolean; failureProject?: string | null };
 type Ledger = { schema: 1; entries: AdmissionEntry[]; candidates: Candidate[] };
 export type Decoded = { raw: string; text: string; project: string | null };
@@ -108,8 +118,9 @@ export class WriteAdmission {
     }
     for (const e of entries) {
       if (this.entries.some(x => x.status === "active" && x.raw === e.raw)) continue;
-      this.entries.push({ ...e, id: randomUUID(), revision: 1, status: "active", source: (source ?? []).map(s => ({ ...s, text: scanContent(s.text) ? "[Source excerpt withheld by content scanner]" : s.text })),
-        sourceStatus: source?.length ? "linked" : "unlinked", observedAt: now });
+      const linked=selectProposalSources([{action:"add",content:e.text}], source ?? [], (source ?? []).filter(s=>s.role==="user" && /^(?:\[telegram\]\s*)?(?:批准|同意|通过|恢复|approve|restore)/iu.test(s.text.trim()))).sources;
+      this.entries.push({ ...e, id: randomUUID(), revision: 1, status: "active", source: linked,
+        sourceStatus: linked.length ? "linked" : "unlinked", observedAt: now });
     }
   }
   /** Preserve identity across confirmed replacements; old revisions are recoverable. */
@@ -145,8 +156,9 @@ export class WriteAdmission {
     // Similar adds always wait; conditions such as S0 versus S4 need review.
     if (ctx?.origin === "approval" || (ctx?.origin === "foreground" && ctx.explicit && ctx.sources.some(s => s.role === "user") && !(adds && similar.length))) return null;
     if (this.candidates.filter(c => c.status === "pending").length >= 200) return { success: false, error: "Pending review limit (200) reached; review existing candidates before proposing more." };
+    const selected = selectProposalSources(operations, ctx?.sourcePool ?? ctx?.sources ?? [], ctx?.explicit ? ctx.sources.filter(s=>s.role==="user") : []);
     const candidate: Candidate = { id: randomUUID(), key, operations: structuredClone(operations),
-      status: "pending", fingerprint: fp, sources: (ctx?.sources ?? []).map(s => ({ ...s, text: scanContent(s.text) ? "[Source excerpt withheld by content scanner; follow session/message id for evidence]" : s.text })), createdAt: new Date().toISOString(), similar,
+      status: "pending", fingerprint: fp, sources: selected.sources, sourceSelection: selected.selection, createdAt: new Date().toISOString(), similar,
       matchRaw: ctx?.matchRaw, requireShrink: ctx?.requireShrink, failureProject: ctx?.failureProject, reason: ctx?.origin === "automatic" ? "Automatic proposal requires review" : similar.length ? "Possible semantic relation; check conditions and scope" : "No explicit verified memory directive" };
     if (ctx?.dryRun) return { success: true, dry_run: true, message: "Dry run: would stage a proposal. Nothing was saved.", preview: candidate };
     this.candidates.push(candidate);

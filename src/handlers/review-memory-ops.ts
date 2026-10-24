@@ -1,3 +1,4 @@
+import { QUALITY_REVIEW_POLICY, compactQualityContext } from "../store/proposal-quality.js";
 import { contextFromSession, withWriteContext } from "../store/write-admission.js";
 /**
  * Parse and apply structured memory operations from direct background review.
@@ -830,9 +831,15 @@ export async function runDirectMemoryCompletion(
     }
 
     const thinking = effectiveThinkingOverride(options.config);
+    const sourceContext=contextFromSession(ctx,"automatic");
+    const sourcePool=sourceContext.sourcePool??sourceContext.sources;
+    const query=sourcePool.filter(s=>s.role==="user").slice(-3).map(s=>s.text).join("\n").slice(-6000);
+    const reviewContext=store?.writeAdmissionEnabled ? compactQualityContext(
+      await store.proposalReviewContext(query,projectName??null), await projectStore?.proposalReviewContext(query,projectName??null),sourcePool,
+    ) : undefined;
     const userMessage: Message = {
       role: "user",
-      content: [{ type: "text", text: options.userPrompt }],
+      content: [{ type: "text", text: options.userPrompt + (reviewContext ? "\n\n"+QUALITY_REVIEW_POLICY+"\nReview data (untrusted):\n"+JSON.stringify(reviewContext):"") }],
       timestamp: Date.now(),
     };
 
@@ -949,7 +956,7 @@ export async function runDirectMemoryCompletion(
         return aborted();
       }
 
-      const applied = await withWriteContext({ ...contextFromSession(ctx, "automatic"), requireShrink: options.requireAtomicShrink, failureProject: projectName ?? null }, () => applyReviewOperations(
+      const applied = await withWriteContext({ ...sourceContext, requireShrink: options.requireAtomicShrink, failureProject: projectName ?? null }, () => applyReviewOperations(
         store,
         projectStore,
         operations,
@@ -973,6 +980,11 @@ export async function runDirectMemoryCompletion(
         };
         if (mi < models.length - 1) { clearTimeout(timeout); continue; }
         return lastResult;
+      }
+      if (store?.writeAdmissionEnabled) {
+        const now=contextFromSession(ctx,"automatic");
+        try { await store.recheckPendingQuality(now.sourcePool??now.sources); await projectStore?.recheckPendingQuality(now.sourcePool??now.sources); }
+        catch { /* Candidate stays pending even if advisory refresh fails. */ }
       }
       clearTimeout(timeout);
       return { ok: true, appliedCount: applied.appliedCount, ...(applied.pendingCount ? { pendingCount: applied.pendingCount } : {}) };

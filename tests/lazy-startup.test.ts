@@ -120,6 +120,7 @@ describe("lazy startup lifecycle", () => {
     assert.doesNotMatch(prompt.systemPrompt, /durable global fact/);
     await emit("message_end", { message: { role: "user", content: "hello" } });
     await emit("turn_end", { message: { role: "assistant", content: [] } });
+    await emit("agent_end", { messages: [] });
     await commands["memory-preview-context"].handler("", ctx);
     await commands["memory-switch-project"].handler("", ctx);
     assert.ok(notifications.some((text) => text.includes("workspace (1 entry)")));
@@ -333,4 +334,18 @@ describe("lazy startup lifecycle", () => {
     const afterFailure = await emit("before_agent_start", { systemPrompt: "base" });
     assert.match(afterFailure.systemPrompt, /Always ask before deployment/);
   });
+});
+
+it("agent_end refreshes pending advisory quality without a model request or a decision",async()=>{
+ ctx.sessionManager.getSessionId=()=>"quality-hook-fixture";
+ const u={type:"message",id:"quality-user",timestamp:new Date().toISOString(),message:{role:"user",content:"Windows S0 WiFi connected"}};
+ let branch:any[]=[u];ctx.sessionManager.getBranch=()=>branch;
+ register();await emit("session_start");
+ const result=await tools.memory_add.execute("quality-add",{target:"project",content:"Windows S0 WiFi connected"},undefined,undefined,ctx);
+ const file=path.join(projectDir,"MEMORY.md.admission.json");const before=JSON.parse(await fs.readFile(file,"utf8"));
+ branch.push({type:"message",id:"later-tool",timestamp:new Date(Date.now()+1000).toISOString(),message:{role:"toolResult",content:"Windows S0 WiFi disconnected"}});
+ await emit("agent_end",{messages:[]});
+ const c=JSON.parse(await fs.readFile(file,"utf8")).candidates.find((c:any)=>c.id===result.details.candidate_id);
+ assert.equal(c.status,"pending");assert.ok(c.quality.later_related_messages.some((s:any)=>s.messageId==="later-tool"));
+ for(const field of ["sources","operations","fingerprint","key"])assert.deepEqual(c[field],before.candidates[0][field]);
 });

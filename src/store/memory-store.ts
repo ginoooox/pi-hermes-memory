@@ -38,6 +38,7 @@ import type {
 import { AGENT_ROOT } from "../paths.js";
 import { canonicalMarkdownIdentity, withMarkdownMutationLock } from "./markdown-mutation-lock.js";
 
+import { relatedSkills, pendingQuality } from "./proposal-quality.js";
 import { candidateGroups, candidateAssessment, entryImpact, sourceEvidence, skillReferences } from "./review-insights.js";
 import { WriteAdmission, currentWriteContext, withWriteContext, fingerprint, type Decoded } from "./write-admission.js";
 
@@ -68,6 +69,8 @@ export class MemoryStore {
   private mutationObserver: ((target: "memory" | "user" | "failure", entries: string[]) => Promise<string | null | undefined>) | null = null;
 
   private admissionEnabled = false;
+  private currentProjectSkillRoots: string[] = [];
+  setReviewSkillRoots(roots: string[]): void { this.currentProjectSkillRoots = roots.slice(0,1); }
   setWriteAdmission(enabled = true): void { this.admissionEnabled = enabled; }
   get writeAdmissionEnabled(): boolean { return this.admissionEnabled; }
 
@@ -598,8 +601,44 @@ export class MemoryStore {
   }
 
   /** Review/restore uses stable ids and an optimistic fingerprint under the mutation lock. */
+  private qualitySkillRoots(): string[] {
+    // The current store's scope plus global Hermes/native skills; no other projects.
+    return [...new Set([path.join(this.memoryDir,"skills"), ...this.currentProjectSkillRoots, path.join(AGENT_ROOT,"pi-hermes-memory","skills"), path.join(AGENT_ROOT,"skills")])];
+  }
+
+  async proposalReviewContext(query: string, projectName: string | null = null): Promise<any> {
+    const entries = (["memory","user","failure"] as const).flatMap(target => this.decodedEntries(target).filter(e=>!e.project || e.project===projectName).map(e=>({target,project:e.project,text:e.text.slice(0,1000)})));
+    const { similarity } = await import("./write-admission.js");
+    return {active:entries.map(e=>({...e,score:similarity(query,e.text)})).filter(e=>e.score>=0.08).sort((a,b)=>b.score-a.score).slice(0,8),
+      skills:await relatedSkills(this.qualitySkillRoots(),query)};
+  }
+
+  /** End-of-agent-run audit only. Never edits candidate operations/status/sources or active memory. */
+  async recheckPendingQuality(sources: import("./write-admission.js").AdmissionSource[]): Promise<number> {
+    if (!this.admissionEnabled || !sources.length) return 0;
+    const sessionIds = new Set(sources.map(s=>s.sessionId)); let checked=0;
+    for (const target of ["memory","user","failure"] as const) {
+      const storagePath = await this.resolveStoragePath(target);
+      await withMarkdownMutationLock(storagePath, async()=>{
+        const ledger=new WriteAdmission(storagePath+".admission.json");await ledger.load();
+        const pending=ledger.candidates.filter(c=>c.status==="pending"&&c.sources.some(s=>sessionIds.has(s.sessionId))).slice(0,200);
+        if(!pending.length)return;
+        await this.syncTargetFromDiskIfChanged(target);
+        // Reconcile in memory for current retrieval; only quality fields of existing candidates are published below.
+        const current=new WriteAdmission(storagePath+".admission.json");await current.load();current.reconcile(this.decodedEntries(target));
+        let changed=false;
+        for(const c of pending){
+          const quality=pendingQuality(c,current.entries,sources,await relatedSkills(this.qualitySkillRoots(),c.operations.map(o=>o.content??o.oldText??"").join("\n")),this.entriesFor(target));
+          if(JSON.stringify(c.quality)!==JSON.stringify(quality)){c.quality=quality;changed=true;}checked++;
+        }
+        if(changed)await ledger.save();
+      });
+    }
+    return checked;
+  }
+
   async reviewAdmission(target: "memory" | "user" | "failure", action: "list" | "active" | "history" | "show" | "approve" | "reject" | "restore" | "duplicate" | "groups" | "evidence" | "impact", id?: string,
-    options: { replaceId?: string; revision?: number; signal?: AbortSignal; limit?: number; offset?: number } = {}): Promise<any> {
+    options: { replaceId?: string; revision?: number; signal?: AbortSignal; limit?: number; offset?: number; sources?: import("./write-admission.js").AdmissionSource[] } = {}): Promise<any> {
     if (!this.admissionEnabled) return { success: false, error: "Write admission is disabled." };
     const storagePath = await this.resolveStoragePath(target);
     const prepared = await withMarkdownMutationLock(storagePath, async () => {
@@ -618,7 +657,9 @@ export class MemoryStore {
           if (!candidate && !entry) return { done:true, result:{success:false,error:"Candidate/entry id not found."} };
           return { done:true, result:{success:true, advisory_only:true, id,
             evidence:sourceEvidence(candidate?.sources ?? entry!.source),
-            ...(candidate ? {assessment:candidateAssessment(candidate,ledger.entries,this.entriesFor(target))} : {revision:entry!.revision,status:entry!.status,source_status:entry!.sourceStatus})} };
+            ...(candidate ? {assessment:candidateAssessment(candidate,ledger.entries,this.entriesFor(target)),
+              source_selection:candidate.sourceSelection,
+              quality:pendingQuality(candidate,ledger.entries,options.sources??[],await relatedSkills(this.qualitySkillRoots(),candidate.operations.map(o=>o.content??o.oldText??"").join("\n")),this.entriesFor(target))} : {revision:entry!.revision,status:entry!.status,source_status:entry!.sourceStatus})} };
         }
         if (!entry) return {done:true,result:{success:false,error:"Entry id not found; impact requires a stable entry id."}};
         return { done:true, result:{...entryImpact(entry,ledger.entries,ledger.candidates,limit,offset),
@@ -1018,6 +1059,15 @@ export class MemoryStore {
             await admission.load();
             admission.reconcile(before);
             const decision = admission.preflight(before, operations);
+            if (decision?.pending && decision.candidate_id && !currentWriteContext()?.dryRun) {
+              const c=admission.candidates.find(c=>c.id===decision.candidate_id)!;
+              c.quality=pendingQuality(c,admission.entries,currentWriteContext()?.sourcePool??currentWriteContext()?.sources??[],
+                await relatedSkills(this.qualitySkillRoots(),operations.map(o=>o.content??o.oldText??"").join("\n")),before.map(e=>e.raw));
+              Object.assign(decision,{review_quality:{advisory_only:true,needs_recheck:c.quality.needs_recheck,
+                evidence_gaps:c.quality.selection.by_operation.filter(o=>o.needs_evidence).map(o=>o.operation_index),
+                related_active_ids:c.quality.related_active.map(e=>e.id),related_skill_files:c.quality.skills.matches.map(e=>e.file),
+                detail_action:"evidence"}});
+            }
             if (!currentWriteContext()?.dryRun) await admission.save();
             if (decision) return decision;
             if (currentWriteContext()?.dryRun) return { success: true, message: "Dry run passed admission; no files changed." };
