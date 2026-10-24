@@ -1,16 +1,18 @@
+import { CandidateStore } from "./store/candidate-store.js";
+import { CandidateLifecycle } from "./handlers/candidate-lifecycle.js";
 /**
  * Pi Hermes Memory Extension
  *
  * Brings Hermes-style persistent memory and a learning loop to any Pi user.
  * After `pi install`, users get:
  *
- * 1. Persistent Memory — MEMORY.md + USER.md that survive across sessions
- * 2. Background Learning Loop — auto-saves notable facts every N turns
- * 3. Session-End Flush — saves memories before compaction/shutdown
- * 4. Auto-Consolidation — merges memory when full instead of erroring
- * 5. Correction Detection — immediate save on user corrections
+ * 1. Persistent Memory — upstream MEMORY.md + USER.md and SQLite search
+ * 2. Candidate learning — task-end model pruning, then threshold-based promotion
+ * 3. Draft isolation — memory and skill edits wait outside active storage
+ * 4. Automatic admission — 20 memories or 3 skills trigger formal comparison
+ * 5. No candidate provenance/history — aggressive deletion of uncertainty
  * 6. Procedural Skills — SKILL.md files for reusable procedures
- * 7. Tool-Call-Aware Nudge — review triggers on tool call count too
+ * 7. One debounced task-end reviewer, with direct model requests only
  * 8. /memory-insights — shows what's stored
  * 9. /memory-skills — lists procedural skills
  * 10. /memory-consolidate — manual consolidation trigger
@@ -37,11 +39,7 @@ import { registerMemoryTool } from "./tools/memory-tool.js";
 import { registerSkillTool } from "./tools/skill-tool.js";
 import { registerSessionSearchTool } from "./tools/session-search-tool.js";
 import { registerMemorySearchTool } from "./tools/memory-search-tool.js";
-import { setupBackgroundReview } from "./handlers/background-review.js";
-import { setupSessionFlush } from "./handlers/session-flush.js";
 import { registerInsightsCommand } from "./handlers/insights.js";
-import { triggerConsolidation, registerConsolidateCommand } from "./handlers/auto-consolidate.js";
-import { setupCorrectionDetector } from "./handlers/correction-detector.js";
 import { registerSkillsCommand } from "./handlers/skills-command.js";
 import { registerInterviewCommand } from "./handlers/interview.js";
 import { registerSwitchProjectCommand } from "./handlers/switch-project.js";
@@ -54,7 +52,6 @@ import { isMemoryChildProcess } from "./handlers/pi-child-process.js";
 import { StandingInstructions } from "./store/standing-instructions.js";
 import { STANDING_FILE } from "./constants.js";
 import { loadConfig } from "./config.js";
-import { shouldWarnAutoConsolidationFailure } from "./auto-consolidation-warning.js";
 import { detectProject, detectProjectSkills } from "./project.js";
 import { buildPromptContext } from "./prompt-context.js";
 import { migrateLegacyProjectMemoryDirs } from "./project-memory-migration.js";
@@ -111,6 +108,8 @@ export default function (pi: ExtensionAPI) {
   const shouldMigrateExtensionRoot = !configuredMemoryDir || pointsToLegacyMemoryDir;
   let persistenceInitialized = false;
 
+  const candidates = new CandidateStore(globalDir);
+  let lifecycle: CandidateLifecycle | undefined;
   const store = new MemoryStore({ ...config, memoryDir: globalDir });
   // Factory may run with no session (Pi public contract). Do not snapshot
   // project identity from process.cwd() here — bind from session_start ctx.cwd
@@ -124,6 +123,7 @@ export default function (pi: ExtensionAPI) {
     legacySkillsDir: path.join(legacyGlobalDir, "skills"),
     migrationSentinelPath: path.join(globalDir, ".skills-migrated-to-extension-storage"),
   });
+  skillStore.setCandidateWorkspace(candidates);
   const dbManager = new DatabaseManager(globalDir);
   let databaseClosed = false;
   const backfillState: SessionBackfillState = { inProgress: false, promise: null };
@@ -287,6 +287,22 @@ export default function (pi: ExtensionAPI) {
 
   const ensureMemoryReady: EnsureMemoryReady = (ctx, signal) => initialization.ensure(ctx, signal);
   const memoryPi = withMemoryInitialization(pi, initialization);
+  lifecycle = new CandidateLifecycle({
+    queue:candidates,config,nativeSkills:path.join(agentRoot,"skills"),
+    project:()=>({name:projectName||null,root:projectMemoryDir}),
+    ensureReady:async(ctx)=>{
+      await ensureMemoryReady(ctx);
+      for(const [file,target] of [["USER.md","user"],["MEMORY.md","memory"],["failures.md","failure"]] as const)
+        await candidates.importLegacy(path.join(globalDir,file+".admission.json"),target,null);
+      if(projectMemoryDir)await candidates.importLegacy(path.join(projectMemoryDir,"MEMORY.md.admission.json"),"project",projectName||null);
+    },
+    synchronize:async()=>{
+      await migrateThenSyncMarkdownMemories(dbManager,null,globalDir,config.projectsMemoryDir,agentRoot,{onlyProjects:projectName?[projectName]:[]});
+      await store.loadFromDisk();await projectStoreRef()?.loadFromDisk();
+    },
+  });
+  lifecycle.attach(store);if(projectStore)lifecycle.attach(projectStore,true);
+
 
   // Skills and pinned instructions must be available even without a lookup.
   pi.on("session_start", async (_event, ctx) => {
@@ -297,6 +313,12 @@ export default function (pi: ExtensionAPI) {
     refreshSkillProjectContext(ctx.cwd);
     await skillStore.migrateLegacySkills();
     await skillStore.ensureDiscoveredRoots();
+    try {
+      const file=path.join(globalDir,"runtime-status.json");fs.mkdirSync(globalDir,{recursive:true,mode:0o700});
+      const tmp=file+"."+process.pid+".tmp";
+      fs.writeFileSync(tmp,JSON.stringify({version:"0.9.11-candidate.1",loadedAt:new Date().toISOString(),pid:process.pid,source:import.meta.url,lifecycle:"automatic-candidates",memoryThreshold:20,skillThreshold:3,memoryReady:initialization.isReady()},null,2)+"\n",{mode:0o600});fs.renameSync(tmp,file);
+    }catch(error){console.warn("Candidate runtime status unavailable");}
+
   });
 
   registerProjectSkillDiscoveryHandler(pi, skillStore, config.projectsMemoryDir);
@@ -305,6 +327,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, _ctx) => {
     const promptContext = await buildPromptContext(config, store, projectStoreRef(), projectNameRef(), standingStore, isMemoryChildProcess());
     if (!promptContext) return;
+    const candidatePolicy="\nCandidate lifecycle: memory_add/replace/remove and skill_manage writes stage expendable drafts, including edits to existing skills. Pending is not active or discoverable; do not claim it is saved. After each completed user task a model aggressively deletes uncertain/transient drafts and merges semantic duplicates. No sources or deleted-draft history are retained. At 20 retained memories or 3 retained skills a second model review promotes against formal knowledge. Equivalent without improvement is discarded, clearer equivalent replaces, complementary facts merge, unresolved conflict discards the new draft. Formal updates retain one rollback version. Use memory_candidates to inspect drafts; manual per-ID approvals are retired. Direct filesystem edits bypass tool staging and must not be used to save generated memory or skills.";
+
 
     // pi 0.86+ hands handlers a normalized clone of these options and re-renders
     // the prompt from it, so appending through `appendSystemPrompt` keeps the
@@ -320,14 +344,14 @@ export default function (pi: ExtensionAPI) {
     // 0.86+ runner normalizes `sections` onto the clone it passes.
     const promptOptions = event.systemPromptOptions;
     if (promptOptions && "sections" in promptOptions) {
-      promptOptions.appendSystemPrompt = [promptOptions.appendSystemPrompt, promptContext]
+      promptOptions.appendSystemPrompt = [promptOptions.appendSystemPrompt, promptContext + candidatePolicy]
         .filter(Boolean)
         .join("\n\n");
       return;
     }
 
     return {
-      systemPrompt: event.systemPrompt + "\n\n" + promptContext,
+      systemPrompt: event.systemPrompt + "\n\n" + promptContext + candidatePolicy,
     };
   });
 
@@ -337,57 +361,9 @@ export default function (pi: ExtensionAPI) {
   // ── 4. Register the skill tool ──
   registerSkillTool(pi, skillStore);
 
-  // ── 5. Setup background learning loop (with tool-call-aware nudge) ──
-  setupBackgroundReview(pi, store, projectStoreRef, config, {
-    dbManager,
-    projectName: projectNameRef,
-    ensureMemoryReady,
-  });
-
-  // ── 6. Setup session-end flush ──
-  setupSessionFlush(pi, store, projectStoreRef, config, dbManager, projectNameRef, { ensureMemoryReady });
-
-  // ── 7. Setup auto-consolidation (inject consolidator into stores) ──
-  // Keep the failure in the tool result regardless; session-console logging is
-  // separately configurable for users who already monitor tool results (#135).
-  const runAutoConsolidation = async (
-    target: "memory" | "user" | "failure",
-    targetStore: MemoryStore,
-    toolTarget: "memory" | "user" | "failure" | "project",
-    signal?: AbortSignal,
-  ) => {
-    const result = await triggerConsolidation(
-      pi,
-      targetStore,
-      target,
-      signal,
-      config.consolidationTimeoutMs,
-      toolTarget,
-      config,
-      null,
-      dbManager,
-      toolTarget === "project" ? projectNameRef() : null,
-    );
-    if (result.deferred) {
-      console.info(`⏳ Auto-consolidation for '${toolTarget}' deferred: ${result.error ?? "another session holds the consolidation lock"}`);
-    } else if (shouldWarnAutoConsolidationFailure(config.autoConsolidationWarnOnFailure, result.consolidated, result.partial === true)) {
-      console.warn(`⚠️ Auto-consolidation ${result.partial ? "partially " : ""}failed for '${toolTarget}': ${result.error ?? "no reason reported"}`);
-    }
-    return result;
-  };
-
-  store.setConsolidator((target, signal) => runAutoConsolidation(target, store, target, signal));
-  configureProjectStore = (candidate) => {
-    if (!candidate) return;
-    candidate.setConsolidator((target, signal) =>
-      runAutoConsolidation(target, candidate, target === "memory" ? "project" : target, signal),
-    );
-  };
-  configureProjectStore(projectStore);
-  registerConsolidateCommand(memoryPi, store, config.consolidationTimeoutMs, projectStoreRef, projectNameRef, config, dbManager);
-
-  // ── 8. Setup correction detection ──
-  setupCorrectionDetector(pi, store, projectStoreRef, config, dbManager, projectNameRef, { ensureMemoryReady });
+  // One task-end pipeline replaces periodic extraction, correction writes,
+  // subprocess flush and direct auto-consolidation. Every write first becomes a draft.
+  lifecycle.register(pi);
 
   // ── 9. Register commands ──
   registerInsightsCommand(memoryPi, store, projectStoreRef, projectNameRef, dbManager);

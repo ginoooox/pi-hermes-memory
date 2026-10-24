@@ -15,20 +15,24 @@ const root = await mkdtemp(join(tmpdir(), "pi-hermes-production-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 let requests = 0;
 const server = createServer((req, res) => {
-  req.resume();
+  let body="";req.setEncoding("utf8");req.on("data",chunk=>{body+=chunk;});
   req.on("end", () => {
     if (req.url !== "/v1/chat/completions") {
       res.writeHead(404).end();
       return;
     }
     requests++;
+    const request=JSON.parse(body);const last=request.messages.at(-1).content;
+    const input=typeof last==="string"?last:last.filter(x=>x.type==="text").map(x=>x.text).join("\n");
+    let answer='{"operations":[]}';
+    try{const data=JSON.parse(input);if(Array.isArray(data.drafts)){answer=JSON.stringify(request.messages[0].content.includes("DRAFT workspace")?{keep:data.drafts.map(d=>d.id),drop:[],merge:[],add:[]}:{decisions:data.drafts.map(d=>({id:d.id,action:"add"}))});}}catch{}
     res.writeHead(200, { "content-type": "text/event-stream" });
     const chunk = (delta, finish_reason) => ({
       id: "smoke", object: "chat.completion.chunk", created: 0, model: "smoke",
       choices: [{ index: 0, delta, finish_reason }],
     });
     res.end([
-      `data: ${JSON.stringify(chunk({ role: "assistant", content: '{"operations":[]}' }, null))}`,
+      `data: ${JSON.stringify(chunk({ role: "assistant", content: answer }, null))}`,
       `data: ${JSON.stringify(chunk({}, "stop"))}`,
       "data: [DONE]", "",
     ].join("\n\n"));
@@ -66,15 +70,25 @@ try {
   await writeFile(probe, `
 import { Type } from "typebox";
 import { runDirectMemoryCompletion } from "./src/handlers/review-memory-ops.js";
+import { CandidateStore } from "./src/store/candidate-store.js";
+import { CandidateLifecycle } from "./src/handlers/candidate-lifecycle.js";
 export default function (pi) {
   pi.registerTool({
     name: "production_probe", label: "Probe", description: "Synthetic direct completion", parameters: Type.Object({}),
-    async execute() {
+    async execute(toolCallId) {
       const model = {
         provider: "openai", api: "openai-completions", id: "smoke", name: "Smoke", baseUrl: ${JSON.stringify(baseUrl)},
         reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 1024,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       };
+      if(toolCallId === "candidate"){
+        const queue=new CandidateStore(${JSON.stringify(join(root,'candidate-data'))});
+        await queue.stage([{kind:"memory",target:"memory",project:null,action:"add",content:"Synthetic durable production fixture"}]);
+        const ctx={model,modelRegistry:{getApiKeyAndHeaders:async()=>({ok:true,apiKey:"synthetic-smoke-key"})},sessionManager:{getSessionId:()=>"smoke",getBranch:()=>[]},ui:{notify:()=>{}}};
+        const engine=new CandidateLifecycle({queue,config:{},nativeSkills:${JSON.stringify(join(root,'native'))},project:()=>({name:null,root:null}),ensureReady:async()=>{},synchronize:async()=>{}});
+        const report=await engine.review(ctx,true);
+        return {content:[{type:"text",text:JSON.stringify(report)}],details:report};
+      }
       const result = await runDirectMemoryCompletion({
         model, modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "synthetic-smoke-key" }) },
       }, {}, null, { userPrompt: "Return no memory operations.", systemPrompt: "Synthetic test.", config: {}, timeoutMs: 10000 });
@@ -98,8 +112,11 @@ export default function (pi) {
     assert.equal(result.details.ok, true, JSON.stringify(result.details));
     assert.equal(result.details.appliedCount, 0);
   }
-  assert.equal(requests, 4);
-  console.log("Production install passed: no package-local SDK peers; Pi jiti load and four loopback direct completions succeeded.");
+  const candidateResult=await tool.execute("candidate",{});
+  assert.equal(candidateResult.details.promoted,1);
+  assert.equal(candidateResult.details.retained,0);
+  assert.equal(requests, 6);
+  console.log("Production install passed: no package-local SDK peers; Pi jiti load and four upstream completions plus real candidate cleanup/promotion loopback requests succeeded.");
 } finally {
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));

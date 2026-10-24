@@ -309,6 +309,7 @@ export function registerMemoryTool(
     pi.on("tool_result", (event) => {
       if (!event.toolName.startsWith("memory_")) return;
       const details = event.details as { success?: unknown } | undefined;
+      if ((details as any)?.pending) return {isError:false};
       if (details?.success === false) return { isError: true };
     });
   }

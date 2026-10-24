@@ -20,6 +20,7 @@ import {
   tokenizeForSimilarity,
 } from "./skill-utils.js";
 import type { SkillDocument, SkillIndex, SkillResult, SkillScope } from "../types.js";
+import { CandidateStore } from "./candidate-store.js";
 import { AGENT_ROOT } from "../paths.js";
 
 interface SkillStoreOptions {
@@ -154,6 +155,18 @@ export function normalizeSkillPatchContent(
 
 
 export class SkillStore {
+  private candidates: CandidateStore | null = null;
+  setCandidateWorkspace(store: CandidateStore): void { this.candidates=store; }
+  private async stageSkill(file:string, raw:string, remove=false):Promise<SkillResult|undefined>{
+    if(!this.candidates)return;
+    const scope=this.projectSkillsDir&&file.startsWith(this.projectSkillsDir+path.sep)?"project":"global";
+    const root=this.getScopeRoot(scope);
+    if(!root||!file.startsWith(root+path.sep))return {success:false,error:"Skill outside managed roots"};
+    const parsed=parseFrontmatter(raw);let old:string|undefined;
+    try{old=parseFrontmatter(await fs.readFile(file,"utf8")).body;}catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")throw e;}
+    const result=await this.candidates.stage([{kind:"skill",target:scope==="project"?"project":"memory",project:scope==="project"?this.projectName:null,action:remove?"remove":old?"replace":"add",content:remove?"":parsed.body,oldText:old??(remove?parsed.body:undefined),name:path.basename(path.dirname(file)),description:parsed.meta.description??""}]);
+    return {...result,skillId:buildSkillId(scope,path.basename(path.dirname(file)),this.projectName),scope};
+  }
   private globalSkillsDir: string;
   private piGlobalSkillsDir: string;
   private projectSkillsDir: string | null;
@@ -357,6 +370,16 @@ export class SkillStore {
   }
 
   async loadSkill(skillId: string): Promise<SkillDocument | null> {
+    const parsed=parseSkillId(skillId);
+    if(this.candidates&&parsed){
+      const project=parsed.scope==="project"?(parsed.projectName??this.projectName):null;
+      if(project&&project!==this.projectName)return null;
+      const d=await this.candidates.findSkill(parsed.slug,project);
+      if(d&&d.action!=="remove"){
+        const root=this.getScopeRoot(parsed.scope);if(!root)return null;
+        return {skillId,scope:parsed.scope,name:parsed.slug,description:d.description!,body:d.content,version:1,created:today(),updated:today(),fileName:"SKILL.md",path:path.join(root,parsed.slug,"SKILL.md"),...(project?{projectName:project}:{}),pending:true} as SkillDocument;
+      }
+    }
     const location = await this.findLocationById(skillId);
     if (!location) return null;
     return this.readLocation(location);
@@ -435,6 +458,8 @@ export class SkillStore {
     }
 
     const filePath = path.join(root, slug, "SKILL.md");
+    const staged=await this.stageSkill(filePath,formatFrontmatter({name:slug,description,version:1,created:today(),updated:today(),body}));
+    if(staged)return staged;
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 
     const displayName = name;
@@ -503,6 +528,8 @@ export class SkillStore {
       }
     }
 
+    const staged=await this.stageSkill(doc.path,formatFrontmatter({name:doc.name,description:doc.description,version:doc.version+1,created:doc.created,updated:today(),body:result.join("\n").trim()}));
+    if(staged)return staged;
     await this.atomicWrite(doc.path, formatFrontmatter({
       name: doc.name,
       displayName: doc.displayName,
@@ -539,6 +566,8 @@ export class SkillStore {
     const scanError = scanContent(`${newDescription} ${newBody}`);
     if (scanError) return { success: false, error: scanError };
 
+    const staged=await this.stageSkill(doc.path,formatFrontmatter({name:doc.name,description:newDescription,version:doc.version+1,created:doc.created,updated:today(),body:newBody}));
+    if(staged)return staged;
     await this.atomicWrite(doc.path, formatFrontmatter({
       name: doc.name,
       displayName: doc.displayName,
@@ -560,6 +589,7 @@ export class SkillStore {
   }
 
   async move(skillId: string, targetScope: SkillScope): Promise<SkillResult> {
+    if(this.candidates)return {success:false,error:"Create a scoped candidate instead of moving active skills directly."};
     const doc = await this.loadSkill(skillId);
     if (!doc) return { success: false, error: `Skill '${skillId}' not found.` };
 
@@ -700,6 +730,8 @@ export class SkillStore {
     const doc = await this.loadSkill(skillId);
     if (!doc) return { success: false, error: `Skill '${skillId}' not found.` };
 
+    const staged=await this.stageSkill(doc.path,formatFrontmatter(doc),true);
+    if(staged)return staged;
     await fs.unlink(doc.path);
     if (path.basename(doc.path) === "SKILL.md") {
       await this.removeEmptyParents(path.dirname(doc.path), this.getScopeRoot(doc.scope));

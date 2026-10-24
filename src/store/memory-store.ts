@@ -64,6 +64,8 @@ export class MemoryStore {
   private overflowSince: Partial<Record<"memory" | "user" | "failure", number>> = {};
   private mutationObserver: ((target: "memory" | "user" | "failure", entries: string[]) => Promise<string | null | undefined>) | null = null;
 
+  private candidateSink: ((target: "memory"|"user"|"failure", operations: MemoryMutationOperation[]) => Promise<MemoryResult>) | null = null;
+  setCandidateSink(sink: NonNullable<MemoryStore["candidateSink"]>): void { this.candidateSink=sink; }
   constructor(private config: MemoryConfig) {}
 
   /**
@@ -304,6 +306,7 @@ export class MemoryStore {
       target,
       (markMutation) => this._add(target, content, signal, addedMessage, project, markMutation),
       signal,
+      [{action:"add",content,project}],
     );
     if (
       result.success
@@ -488,7 +491,7 @@ export class MemoryStore {
       await this.saveToDisk(target);
       markMutation();
       return this.successResponse(target, `Applied ${operations.length} memory operations atomically.`);
-    }, options.signal);
+    }, options.signal, operations);
   }
 
   async replace(target: "memory" | "user" | "failure", oldText: string, newContent: string, signal?: AbortSignal): Promise<MemoryResult> {
@@ -496,6 +499,7 @@ export class MemoryStore {
       target,
       (markMutation) => this.replaceUnlocked(target, oldText, newContent, markMutation),
       signal,
+      [{action:"replace",oldText,content:newContent}],
     );
   }
 
@@ -557,6 +561,7 @@ export class MemoryStore {
       target,
       (markMutation) => this.removeUnlocked(target, oldText, markMutation),
       signal,
+      [{action:"remove",oldText}],
     );
   }
 
@@ -884,7 +889,12 @@ export class MemoryStore {
     target: "memory" | "user" | "failure",
     mutation: (markMutation: () => void) => Promise<MemoryResult>,
     signal?: AbortSignal,
+    operations: MemoryMutationOperation[] = [],
   ): Promise<MemoryResult> {
+    if(this.candidateSink){
+      if(signal?.aborted)return {success:false,error:"Memory mutation cancelled."};
+      try{return await this.candidateSink(target,operations);}catch(e){return {success:false,error:e instanceof Error?e.message:String(e)};}
+    }
     const storagePath = await this.resolveStoragePath(target);
     return withMarkdownMutationLock(storagePath, async () => {
       for (let attempt = 0; ; attempt++) {

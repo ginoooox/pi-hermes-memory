@@ -1,3 +1,5 @@
+> Personal candidate-lifecycle edition (`0.9.11-candidate.1`), rebuilt from the original author's released `0.9.11` source. Memory **and skill writes** become drafts. A debounced task-end model prunes/merges them; 20 retained memories or 3 retained skills trigger automatic admission against formal knowledge. Draft provenance and deletion history are intentionally not retained. Manual per-ID admission from the earlier personal fork is retired. Read [the lifecycle contract](docs/CANDIDATE-LIFECYCLE.md); the upstream documentation below describes the underlying storage/search features and some superseded learning commands.
+
 <div align="center">
 
 ![Pi Hermes Memory](docs/images/pi_memory.png)
