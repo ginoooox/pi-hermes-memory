@@ -91,11 +91,29 @@ describe("session project memory rebinding", () => {
         undefined,
         { cwd: targetDir },
       );
-      assert.equal(writeResult.details.success, true);
+      assert.equal(writeResult.details.pending, true);
 
       const sessionMemory = await fs.readFile(path.join(sessionMemoryDir, "MEMORY.md"), "utf-8");
       const launchMemory = await fs.readFile(path.join(launchMemoryDir, "MEMORY.md"), "utf-8");
-      assert.match(sessionMemory, /session-cwd write/);
+      assert.doesNotMatch(sessionMemory, /session-cwd write/);
+      const queueFile = path.join(agentRoot, "pi-hermes-memory", ".candidates", "queue.json");
+      let queue = JSON.parse(await fs.readFile(queueFile, "utf8"));
+      assert.equal(queue.drafts[0].project, path.basename(targetDir));
+      for (const action of ["replace", "remove"] as const) {
+        const r = await mockPi.tools["memory_" + action].execute("edit", {
+          target: "project", old_text: "active-session memory", content: "replacement draft",
+        }, undefined, undefined, { cwd: targetDir });
+        assert.equal(r.details.pending, true);
+      }
+      // A later project rebind must receive the same gate and retain its own scope.
+      const rebound = await mockPi.tools.memory_add.execute("rebind", {
+        target: "project", content: "launch draft after switching",
+      }, undefined, undefined, { cwd: launchDir });
+      assert.equal(rebound.details.pending, true);
+      queue = JSON.parse(await fs.readFile(queueFile, "utf8"));
+      assert.equal(queue.drafts.length, 4);
+      assert.equal(queue.drafts[3].project, path.basename(launchDir));
+      assert.equal(await fs.readFile(path.join(sessionMemoryDir, "MEMORY.md"), "utf8"), sessionMemory);
       assert.doesNotMatch(launchMemory, /session-cwd write/);
     } finally {
       process.chdir(previousCwd);

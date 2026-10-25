@@ -174,6 +174,7 @@ export default function (pi: ExtensionAPI) {
     if (nextProjectMemoryDir !== projectMemoryDir) {
       projectMemoryDir = nextProjectMemoryDir;
       projectStore = createProjectStore(nextProject);
+      if (projectStore) lifecycle?.attach(projectStore, true, nextProject.name ?? null);
       configureProjectStore(projectStore);
       configureMemoryToolProjectStore(projectStore);
       projectLoad = projectStore?.loadFromDisk().catch((error) => {
@@ -316,7 +317,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const file=path.join(globalDir,"runtime-status.json");fs.mkdirSync(globalDir,{recursive:true,mode:0o700});
       const tmp=file+"."+process.pid+".tmp";
-      fs.writeFileSync(tmp,JSON.stringify({version:"0.9.11-candidate.1",loadedAt:new Date().toISOString(),pid:process.pid,source:import.meta.url,lifecycle:"automatic-candidates",memoryThreshold:20,skillThreshold:3,memoryReady:initialization.isReady()},null,2)+"\n",{mode:0o600});fs.renameSync(tmp,file);
+      fs.writeFileSync(tmp,JSON.stringify({version:"0.9.11-candidate.2",loadedAt:new Date().toISOString(),pid:process.pid,source:import.meta.url,lifecycle:"automatic-candidates",memoryThreshold:20,skillThreshold:3,memoryReady:initialization.isReady()},null,2)+"\n",{mode:0o600});fs.renameSync(tmp,file);
     }catch(error){console.warn("Candidate runtime status unavailable");}
 
   });

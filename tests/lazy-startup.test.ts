@@ -120,9 +120,9 @@ describe("lazy startup lifecycle", () => {
       tools.memory_add.execute("write", { target: "project", content: "new durable project fact" }, undefined, undefined, ctx),
     ]);
     assert.equal(results[0].details.count, 2);
-    assert.equal(results[2].details.success, true);
+    assert.equal(results[2].details.pending, true);
     assert.equal(loads.mock.callCount(), 2, "one global and one project load");
-    assert.equal((await search()).details.count, 3);
+    assert.equal((await search()).details.count, 2);
     assert.equal(loads.mock.callCount(), 2);
     assert.match(await fs.readFile(path.join(projectDir, "MEMORY.md"), "utf8"), /durable project fact/);
   });

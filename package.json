@@ -1,6 +1,6 @@
 {
   "name": "pi-hermes-memory",
-  "version": "0.9.11-candidate.1",
+  "version": "0.9.11-candidate.2",
   "description": "Upstream-based task-end candidate pruning and automatic memory/skill promotion",
   "type": "module",
   "main": "src/index.ts",

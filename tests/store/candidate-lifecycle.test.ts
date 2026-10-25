@@ -20,6 +20,7 @@ import {
   CLEANUP_POLICY,
   PROMOTION_POLICY,
   reviewBatch,
+  cleanupFormalData,
 } from "../../src/handlers/candidate-lifecycle.js";
 import { MemoryStore } from "../../src/store/memory-store.js";
 import { SkillStore } from "../../src/store/skill-store.js";
@@ -143,6 +144,7 @@ describe("candidate lifecycle", { concurrency: 1 }, () => {
       {
         keep: [],
         drop: [c.id],
+      dropReasons: { [c.id]: { category: "uncertain", basis: "Fixture explicitly describes an unresolved diagnosis" } },
         merge: [{ ids: [a.id, b.id], content: "One complete fact" }],
         add: [],
       },
@@ -185,7 +187,7 @@ describe("candidate lifecycle", { concurrency: 1 }, () => {
     const after = applyCleanup(
       before,
       visible,
-      { keep: [], drop: visible.map((d) => d.id), merge: [], add: [] },
+      { keep: [], drop: visible.map((d) => d.id), dropReasons: Object.fromEntries(visible.map(d => [d.id, { category: "transient" as const, basis: "Synthetic temporary fact" }])), merge: [], add: [] },
       "demo",
     );
     assert.equal(after.drafts[0].project, "elsewhere");
@@ -572,12 +574,14 @@ describe("candidate lifecycle", { concurrency: 1 }, () => {
       options(async (phase: string, data: any) => {
         assert.equal(phase, "cleanup");
         assert.ok(data.task_context.includes("toolResult"));
-        return { ...keep([data.drafts[0].id]), drop: [data.drafts[1].id] };
+        return { ...keep([data.drafts[0].id]), drop: [data.drafts[1].id], dropReasons: { [data.drafts[1].id]: { category: "uncertain", basis: "Fixture explicitly uncertain" } } };
       }),
     );
     const r = await engine.review(context());
     assert.equal(r.retained, 1);
     assert.equal(r.promoted, 0);
+    assert.equal(r.cleanupDropped, 1);
+    assert.equal(r.promotionDiscarded, 0);
     assert.equal(await readOptional(path.join(q.root, "MEMORY.md")), null);
     assert.equal((await engine.review(context())).skipped, "no new task");
   });
@@ -794,4 +798,138 @@ describe("candidate lifecycle", { concurrency: 1 }, () => {
     );
     assert.match(PROMOTION_POLICY, /readonly/);
   });
+
+  it("retains established carry-over knowledge with unrelated task context", async () => {
+    await q.stage([input("Device A supports S0 wake; S4 is unsupported")]);
+    const engine = new CandidateLifecycle(options(async (_phase: string, data: any) => {
+      assert.equal(data.formal.complete, false);
+      assert.match(CLEANUP_POLICY, /Absence of repeated evidence.*NEVER/);
+      return keep(data.drafts.map((d: any) => d.id));
+    }));
+    await engine.review(context());
+    const ctx = context(); ctx.sessionManager.getSessionId = () => "other-session";
+    ctx.sessionManager.getBranch = () => [{ type: "message", id: "unrelated", message: { role: "user", content: "Discuss a different device" } }];
+    const result = await engine.review(ctx);
+    assert.equal(result.retained, 1);
+    assert.equal(result.cleanupDropped, 0);
+    assert.match((await q.read()).drafts[0].content, /S0.*S4/);
+  });
+  it("rejects absence-of-context as a cleanup reason without deleting drafts", async () => {
+    await q.stage([input("Established durable fixture")]);
+    const before = await q.read();
+    const engine = new CandidateLifecycle(options(async (_phase: string, data: any) => ({
+      ...keep([]), drop: [data.drafts[0].id],
+      dropReasons: { [data.drafts[0].id]: { category: "missing_current_evidence", basis: "Not repeated this task" } },
+    })));
+    await assert.rejects(engine.review(context()), /concrete allowed reason/);
+    assert.deepEqual(await q.read(), before);
+    const status = JSON.parse((await readOptional(path.join(q.root, "candidate-status.json")))!);
+    assert.equal(status.status, "failed");
+    assert.equal(status.errorCategory, "invalid_plan");
+  });
+  it("reports five cleanup deletions separately from zero promotion discards", async () => {
+    await q.stage(Array.from({ length: 5 }, (_, i) => input("Temporary task step " + i)));
+    const result = await new CandidateLifecycle(options(async (_phase: string, data: any) => ({
+      ...keep([]), drop: data.drafts.map((d: any) => d.id),
+      dropReasons: Object.fromEntries(data.drafts.map((d: any) => [d.id, { category: "transient", basis: "Synthetic completed task step" }])),
+    }))).review(context());
+    assert.equal(result.reviewed, 5); assert.equal(result.retained, 0);
+    assert.equal(result.cleanupDropped, 5); assert.equal(result.promotionDiscarded, 0);
+    assert.equal(result.discarded, 0);
+    const metrics = JSON.parse((await readOptional(path.join(q.root, "candidate-metrics.json")))!);
+    assert.equal(metrics.totals.cleanupDropped, 5);
+    assert.ok(!JSON.stringify(metrics).includes("Temporary task step"));
+    assert.ok(!JSON.stringify(metrics).includes("Synthetic completed"));
+  });
+  it("preserves cleanup counts when promotion fails", async () => {
+    await q.stage([input("Temporary fixture"), ...Array.from({ length: 20 }, (_, i) => input("Fact " + i))]);
+    const engine = new CandidateLifecycle(options(async (phase: string, data: any) => phase === "cleanup" ? {
+      ...keep(data.drafts.slice(1).map((d: any) => d.id)), drop: [data.drafts[0].id],
+      dropReasons: { [data.drafts[0].id]: { category: "transient", basis: "Explicitly temporary fixture" } },
+    } : { decisions: [] }));
+    await assert.rejects(engine.review(context()));
+    const status = JSON.parse((await readOptional(path.join(q.root, "candidate-status.json")))!);
+    assert.equal(status.cleanupDropped, 1); assert.equal(status.promoted, 0);
+    assert.equal(status.phase, "promotion"); assert.equal(status.status, "failed");
+    assert.equal((await q.read()).drafts.length, 20);
+  });
+  it("uses compact cleanup input but full formal bodies for admission", async () => {
+    const largeSkill = body + "\n" + "Long synthetic reference. ".repeat(700);
+    await atomicText(path.join(q.root, "skills", "other-task", "SKILL.md"), formatFrontmatter({ name: "other-task", description: "Other synthetic procedure", body: largeSkill, version: 1, created: today(), updated: today() }));
+    await q.stage([input()]);
+    let cleanupChars = 0, promotionChars = 0;
+    await new CandidateLifecycle(options(async (phase: string, data: any) => {
+      if (phase === "cleanup") {
+        assert.equal(data.formal.complete, false);
+        assert.ok(!JSON.stringify(data.formal).includes("Long synthetic reference"));
+        cleanupChars = JSON.stringify(data.formal).length;
+        return keep(data.drafts.map((d: any) => d.id));
+      }
+      assert.equal(data.formal.complete, true);
+      assert.ok(JSON.stringify(data.formal).includes("Long synthetic reference"));
+      promotionChars = JSON.stringify(data.formal).length;
+      return { decisions: data.drafts.map((d: any) => ({ id: d.id, action: "add" })) };
+    })).review(context(), true);
+    assert.ok(cleanupChars < promotionChars / 5);
+  });
+  it("rejects concurrent formal changes even during cleanup", async () => {
+    const file = path.join(q.root, "MEMORY.md");
+    await atomicText(file, "Original formal"); await q.stage([input()]);
+    const before = await q.read();
+    const engine = new CandidateLifecycle(options(async (_phase: string, data: any) => {
+      await atomicText(file, "External replacement"); return keep(data.drafts.map((d: any) => d.id));
+    }));
+    await assert.rejects(engine.review(context()), /changed during review/);
+    assert.deepEqual(await q.read(), before);
+    assert.equal(await readOptional(file), "External replacement");
+  });
+  it("records cancellation without retaining context or error text", async () => {
+    await q.stage([input()]);
+    let signalStart!: () => void;
+    const started = new Promise<void>(r => { signalStart = r; });
+    const engine = new CandidateLifecycle(options(async (_p: string, _d: any, _c: any, signal: AbortSignal) => {
+      signalStart(); return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("Synthetic sensitive error text")), { once: true }));
+    }));
+    const run = engine.review(context()); await started; engine.cancel(); await assert.rejects(run);
+    const raw = (await readOptional(path.join(q.root, "candidate-metrics.json")))!;
+    assert.equal(JSON.parse(raw).recent[0].status, "cancelled");
+    assert.ok(!raw.includes("sensitive")); assert.equal((await q.read()).drafts.length, 1);
+  });
+  it("bounds telemetry history while preserving cumulative counts", async () => {
+    const { ReviewMetrics } = await import("../../src/handlers/candidate-metrics.js");
+    for (let i = 0; i < 35; i++) await new ReviewMetrics(q.root).finish("success");
+    const data = JSON.parse((await readOptional(path.join(q.root, "candidate-metrics.json")))!);
+    assert.equal(data.recent.length, 32); assert.equal(data.totals.runs, 35);
+  });
+  for (const reason of ["new", "resume", "reload"]) {
+    it("repairs only the inspection tool on " + reason + " and respects later deselection", async () => {
+      let active = ["read", "memory_add", "custom_other"];
+      const branch: any[] = []; const handlers: Record<string, any> = {};
+      const engine = new CandidateLifecycle(options(async () => ({})));
+      engine.register({
+        on: (name: string, fn: any) => { handlers[name] = fn; },
+        registerTool: () => {}, registerCommand: () => {},
+        getActiveTools: () => active,
+        getAllTools: () => [{ name: "memory_candidates" }, { name: "unselected_tool" }],
+        setActiveTools: (names: string[]) => { active = names; },
+        appendEntry: (customType: string, data: any) => branch.push({ type: "custom", customType, data }),
+      } as any);
+      const ctx = context(); ctx.sessionManager.getBranch = () => branch;
+      await handlers.session_start({ reason }, ctx);
+      assert.deepEqual(active, ["read", "memory_add", "custom_other", "memory_candidates"]);
+      active = ["read", "memory_add", "custom_other"];
+      await handlers.session_start({ reason: "reload" }, ctx);
+      assert.deepEqual(active, ["read", "memory_add", "custom_other"]);
+    });
+  }
+  it("does not add inspection to a deliberately read-only tool selection", async () => {
+    let active = ["read", "memory_search"];
+    const handlers: Record<string, any> = {};
+    new CandidateLifecycle(options(async () => ({}))).register({ on: (n: string, f: any) => { handlers[n] = f; },
+      registerTool: () => {}, registerCommand: () => {}, getActiveTools: () => active,
+      setActiveTools: (names: string[]) => { active = names; }, appendEntry: () => {} } as any);
+    await handlers.session_start({ reason: "resume" }, context());
+    assert.deepEqual(active, ["read", "memory_search"]);
+  });
+
 });

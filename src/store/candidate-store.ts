@@ -258,6 +258,7 @@ export class CandidateStore {
 export interface CleanupPlan {
   keep: string[];
   drop: string[];
+  dropReasons?: Record<string, { category: "transient" | "duplicate" | "superseded" | "contradicted" | "uncertain" | "low_value"; basis: string }>;
   merge: Array<{ ids: string[]; content: string; description?: string }>;
   add: DraftInput[];
 }
@@ -284,7 +285,13 @@ export function applyCleanup(
     return byId.get(id)!;
   };
   const next = plan.keep.map((id) => claim(id));
-  for (const id of plan.drop) claim(id);
+  for (const id of plan.drop) {
+    claim(id);
+    const reason = plan.dropReasons?.[id];
+    if (!reason || !["transient", "duplicate", "superseded", "contradicted", "uncertain", "low_value"].includes(reason.category) ||
+        typeof reason.basis !== "string" || !reason.basis.trim() || reason.basis.length > 1200)
+      throw new Error("Cleanup drop requires a concrete allowed reason; absent recent evidence is not a reason");
+  }
   for (const group of plan.merge) {
     if (!Array.isArray(group.ids) || !group.ids.length)
       throw new Error("Empty merge");
@@ -317,14 +324,11 @@ export function applyCleanup(
   }
   const untouched = q.drafts.filter((d) => !byId.has(d.id));
   const unique: Draft[] = [];
-  for (const d of [...untouched, ...next])
-    if (
-      !unique.some(
-        (x) =>
-          JSON.stringify(validateDraft(x)) === JSON.stringify(validateDraft(d)),
-      )
-    )
-      unique.push(d);
+  const fingerprints = new Set<string>();
+  for (const d of [...untouched, ...next]) {
+    const key = JSON.stringify(validateDraft(d));
+    if (!fingerprints.has(key)) { fingerprints.add(key); unique.push(d); }
+  }
   return { ...q, revision: q.revision + 1, drafts: unique };
 }
 export function thresholdReached(drafts: Draft[]): boolean {
