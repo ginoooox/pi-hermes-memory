@@ -15,6 +15,9 @@ import { withMarkdownMutationLock } from "./markdown-mutation-lock.js";
 import { ENTRY_DELIMITER } from "../constants.js";
 import { parseFrontmatter, formatFrontmatter, today } from "./skill-utils.js";
 import { scanContent } from "./content-scanner.js";
+import {
+  draftFormatIssues,
+} from "./candidate-format.js";
 
 export interface FormalItem {
   id: string;
@@ -244,6 +247,17 @@ export class CandidatePublisher {
           scanContent(content))
       )
         throw new Error("Invalid publication content");
+      // Single shared format validator: published skill bodies need all four
+      // sections (incl. Pitfalls) and published failure memories need an
+      // allowed [category] tag if one is present. Repaired legacy content
+      // passes here exactly like fresh content.
+      if (decision.action !== "remove") {
+        const issues = draftFormatIssues({ ...d, content, action: decision.action });
+        if (issues.length)
+          throw new Error(
+            `Publication content fails format validation: ${issues.join("; ")}`,
+          );
+      }
       if (d.kind === "memory") {
         const file = this.memoryFile(d.target);
         let edit = edits.get(file);
@@ -285,9 +299,6 @@ export class CandidatePublisher {
           throw new Error("New skill appeared during review");
         let after: string | null = null;
         if (decision.action !== "remove") {
-          for (const section of ["When to Use", "Procedure", "Verification"])
-            if (!new RegExp("^## " + section + "\\s*$", "m").test(content))
-              throw new Error("Skill lacks required sections");
           const description = decision.description ?? d.description!;
           if (
             !description ||

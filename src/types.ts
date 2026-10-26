@@ -135,6 +135,22 @@ export interface MemoryConfig {
    * Default: 0 (disabled).
    */
   sessionRetentionDays?: number;
+  /**
+   * Pending memory drafts that trigger the admission review. Default: 10.
+   * Invalid (non-integer, < 1) values in config are ignored.
+   */
+  candidateMemoryThreshold?: number;
+  /**
+   * Pending skill drafts that trigger the admission review. Default: 2.
+   * Invalid (non-integer, < 1) values in config are ignored.
+   */
+  candidateSkillThreshold?: number;
+  /**
+   * Pending age in hours after which a task-end review forces a full
+   * cleanup+admission pass. Default: 24. Invalid (non-finite, <= 0) values
+   * in config are ignored.
+   */
+  candidatePendingFallbackHours?: number;
 }
 
 export type MemoryCategory =

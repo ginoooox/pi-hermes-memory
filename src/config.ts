@@ -20,6 +20,9 @@ import {
   DEFAULT_FAILURE_INJECTION_MAX_AGE_DAYS,
   DEFAULT_FAILURE_INJECTION_MAX_ENTRIES,
   DEFAULT_SESSION_RETENTION_DAYS,
+  DEFAULT_CANDIDATE_MEMORY_THRESHOLD,
+  DEFAULT_CANDIDATE_SKILL_THRESHOLD,
+  DEFAULT_CANDIDATE_PENDING_FALLBACK_HOURS,
 } from "./constants.js";
 import { AGENT_ROOT, normalizeConfiguredMemoryDir, normalizeProjectsMemoryDir } from "./paths.js";
 
@@ -79,6 +82,9 @@ const DEFAULT_CONFIG: MemoryConfig = {
   sessionSearch: { variant: "legacy" },
   quickCheckOnOpen: true,
   sessionRetentionDays: DEFAULT_SESSION_RETENTION_DAYS,
+  candidateMemoryThreshold: DEFAULT_CANDIDATE_MEMORY_THRESHOLD,
+  candidateSkillThreshold: DEFAULT_CANDIDATE_SKILL_THRESHOLD,
+  candidatePendingFallbackHours: DEFAULT_CANDIDATE_PENDING_FALLBACK_HOURS,
 };
 
 export const DEFAULT_CONFIG_PATH = path.join(
@@ -179,6 +185,17 @@ export function loadConfig(configPath = DEFAULT_CONFIG_PATH): MemoryConfig {
       // ignored, keeping the current (default) semantics.
       if (typeof parsed.sessionRetentionDays === "number" && Number.isFinite(parsed.sessionRetentionDays) && parsed.sessionRetentionDays >= 0) {
         config.sessionRetentionDays = parsed.sessionRetentionDays;
+      }
+      // Admission thresholds: positive integers only; invalid values keep defaults.
+      const isPositiveInteger = (value: unknown): value is number =>
+        typeof value === "number" && Number.isInteger(value) && value >= 1;
+      if (isPositiveInteger(parsed.candidateMemoryThreshold)) config.candidateMemoryThreshold = parsed.candidateMemoryThreshold;
+      if (isPositiveInteger(parsed.candidateSkillThreshold)) config.candidateSkillThreshold = parsed.candidateSkillThreshold;
+      // Pending fallback: any finite value > 0 hours (fractions allowed for tests).
+      if (typeof parsed.candidatePendingFallbackHours === "number"
+        && Number.isFinite(parsed.candidatePendingFallbackHours)
+        && parsed.candidatePendingFallbackHours > 0) {
+        config.candidatePendingFallbackHours = parsed.candidatePendingFallbackHours;
       }
       if (typeof parsed.standingInstructionsEnabled === "boolean") config.standingInstructionsEnabled = parsed.standingInstructionsEnabled;
       if (typeof parsed.projectCharLimit === "number") config.projectCharLimit = parsed.projectCharLimit;

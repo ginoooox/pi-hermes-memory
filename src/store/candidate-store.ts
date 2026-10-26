@@ -4,6 +4,10 @@ import * as path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { withMarkdownMutationLock } from "./markdown-mutation-lock.js";
 import { scanContent } from "./content-scanner.js";
+import {
+  draftFormatIssues,
+  formatRepairHint,
+} from "./candidate-format.js";
 
 export type DraftTarget = "memory" | "user" | "project" | "failure";
 export interface Draft {
@@ -17,16 +21,61 @@ export interface Draft {
   name?: string;
   description?: string;
   updatedAt: string;
+  /** Oldest-pending time; set at staging and preserved across rewrites of the same draft. */
+  stagedAt?: string;
+  /** Content digest captured at this draft's last successful cleanup review; absent = never reviewed. */
+  reviewedDigest?: string;
 }
-export type DraftInput = Omit<Draft, "id" | "updatedAt">;
+export type DraftInput = Omit<Draft, "id" | "updatedAt" | "stagedAt" | "reviewedDigest">;
 export interface DraftQueue {
   schema: 1;
   revision: number;
   drafts: Draft[];
   imports: string[];
+  /** Digests of exact task-end cleanup inputs already successfully reviewed, for cross-reload input skips. Bounded. */
+  cleanupInputs?: Record<string, string>;
+  /** Formal fingerprint captured at each project's last successful cleanup commit. */
+  formalHashes?: Record<string, string>;
 }
 export const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
+export const PROMOTION_THRESHOLDS = { memory: 10, skill: 2 } as const;
+export const PENDING_FALLBACK_HOURS = 24;
+export const CLEANUP_INPUT_CAP = 32;
+const markersValid = (m: unknown) =>
+  m === undefined ||
+  (typeof m === "object" &&
+    m !== null &&
+    !Array.isArray(m) &&
+    Object.values(m as Record<string, unknown>).every((v) => typeof v === "string"));
+/** Explicit stable content fields; id/update/staging/review-bookkeeping churn is excluded. */
+export const stableDraftFields = (d: Draft) => ({
+  kind: d.kind,
+  target: d.target,
+  project: d.project,
+  action: d.action,
+  content: d.content,
+  ...(d.oldText ? { oldText: d.oldText } : {}),
+  ...(d.name ? { name: d.name } : {}),
+  ...(d.description ? { description: d.description } : {}),
+});
+/** Content identity without id/revision/date churn; rewriting the same draft invalidates it. */
+export const contentDigest = (d: Draft) => digest(JSON.stringify(stableDraftFields(d)));
+/** Oldest-pending time starts at staging; legacy drafts honestly fall back to their update time. */
+export const pendingSince = (d: Draft): string => d.stagedAt ?? d.updatedAt;
+/** Bounded digest->time markers; only persisted as part of a successful commit. */
+export function boundedMarkers(
+  existing: Record<string, string> | undefined,
+  add: Array<[string, string]>,
+  cap: number,
+): Record<string, string> {
+  const next: Record<string, string> = { ...(existing ?? {}) };
+  for (const [k, v] of add) next[k] = v;
+  const entries = Object.entries(next);
+  if (entries.length <= cap) return next;
+  entries.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  return Object.fromEntries(entries.slice(-cap));
+}
 export const sameScope = (
   a: Pick<Draft, "kind" | "target" | "project">,
   b: Pick<Draft, "kind" | "target" | "project">,
@@ -120,7 +169,14 @@ export class CandidateStore {
       q.schema !== 1 ||
       !Number.isInteger(q.revision) ||
       !Array.isArray(q.drafts) ||
-      !Array.isArray(q.imports)
+      !Array.isArray(q.imports) ||
+      !markersValid(q.cleanupInputs) ||
+      !markersValid(q.formalHashes) ||
+      !q.drafts.every(
+        (d) =>
+          (d.reviewedDigest === undefined || typeof d.reviewedDigest === "string") &&
+          (d.stagedAt === undefined || typeof d.stagedAt === "string"),
+      )
     )
       throw new Error("Invalid candidate workspace");
     return q;
@@ -142,6 +198,24 @@ export class CandidateStore {
     message: string;
   }> {
     const normalized = inputs.map(validateDraft);
+    // Deterministic format gate for NEW writes only, with an actionable
+    // transient issue list. Legacy queued drafts are never format-checked,
+    // so a malformed old draft cannot poison staging of valid peers.
+    const formatErrors: string[] = [];
+    for (const [i, d] of normalized.entries()) {
+      const issues = draftFormatIssues(d);
+      if (issues.length)
+        formatErrors.push(
+          formatRepairHint(
+            `draft ${i} (${d.kind}${d.name ? " " + d.name : ""})`,
+            issues,
+          ),
+        );
+    }
+    if (formatErrors.length)
+      throw new Error(
+        "Candidate format validation failed\n" + formatErrors.join("\n"),
+      );
     return this.locked(async (q) => {
       const ids: string[] = [];
       let changed = false;
@@ -160,10 +234,12 @@ export class CandidateStore {
                 (d) => sameScope(d, input) && d.name === input.name,
               )
             : -1;
+        const now = new Date().toISOString();
         const d: Draft = {
           ...input,
           id: index >= 0 ? q.drafts[index].id : randomUUID(),
-          updatedAt: new Date().toISOString(),
+          updatedAt: now,
+          stagedAt: index >= 0 ? pendingSince(q.drafts[index]) : now,
         };
         if (index >= 0) q.drafts[index] = d;
         else q.drafts.push(d);
@@ -245,6 +321,7 @@ export class CandidateStore {
               ...input,
               id: randomUUID(),
               updatedAt: new Date().toISOString(),
+              stagedAt: new Date().toISOString(),
             });
         }
       }
@@ -284,7 +361,11 @@ export function applyCleanup(
     used.add(id);
     return byId.get(id)!;
   };
-  const next = plan.keep.map((id) => claim(id));
+  // Tag every reviewed draft with its actual resulting content digest so the
+  // next routine cleanup only resends new or changed content. Applied drafts
+  // were reviewed too; untouched drafts are never tagged.
+  const tag = (d: Draft): Draft => ({ ...d, reviewedDigest: contentDigest(d) });
+  const next = plan.keep.map((id) => tag(claim(id)));
   for (const id of plan.drop) {
     claim(id);
     const reason = plan.dropReasons?.[id];
@@ -311,29 +392,102 @@ export function applyCleanup(
       content: group.content,
       description: group.description ?? first.description,
     });
-    next.push({ ...input, id: first.id, updatedAt: new Date().toISOString() });
+    // A merge rewrites content, so it must carry the required format; this is
+    // also the repair path for malformed legacy drafts. A merge that leaves
+    // the format broken fails deterministically with transient repair
+    // instructions and the queue is left unchanged.
+    const mergeIssues = draftFormatIssues(input);
+    if (mergeIssues.length)
+      throw new Error(
+        "Merge content must be format-valid\n" +
+          formatRepairHint(`merge of [${group.ids.join(", ")}]`, mergeIssues),
+      );
+    // Oldest pending time across every merged draft wins; legacy drafts
+    // freeze their honest updatedAt before the rewrite, never now().
+    const earliest = items
+      .map((d) => pendingSince(d))
+      .sort()[0];
+    next.push(
+      tag({
+        ...input,
+        id: first.id,
+        updatedAt: new Date().toISOString(),
+        stagedAt: earliest,
+      }),
+    );
   }
   if (used.size !== visible.length)
     throw new Error("Cleanup did not cover all reviewed drafts");
   if (plan.add.length > 8) throw new Error("Too many extracted drafts");
   for (const value of plan.add) {
     const d = validateDraft(value);
+    const addIssues = draftFormatIssues(d);
+    if (addIssues.length)
+      throw new Error(
+        "Extracted draft must be format-valid\n" +
+          formatRepairHint(`add (${d.kind})`, addIssues),
+      );
     if (d.project && d.project !== project)
       throw new Error("Extraction crossed project scope");
-    next.push({ ...d, id: randomUUID(), updatedAt: new Date().toISOString() });
+    next.push(
+      tag({
+        ...d,
+        id: randomUUID(),
+        updatedAt: new Date().toISOString(),
+        stagedAt: new Date().toISOString(),
+      }),
+    );
   }
   const untouched = q.drafts.filter((d) => !byId.has(d.id));
   const unique: Draft[] = [];
-  const fingerprints = new Set<string>();
+  const fingerprints = new Map<string, Draft>();
   for (const d of [...untouched, ...next]) {
     const key = JSON.stringify(validateDraft(d));
-    if (!fingerprints.has(key)) { fingerprints.add(key); unique.push(d); }
+    const prev = fingerprints.get(key);
+    if (!prev) {
+      fingerprints.set(key, d);
+      unique.push(d);
+      continue;
+    }
+    // Duplicate content: preserve the oldest pending instance in place.
+    if (pendingSince(d) < pendingSince(prev)) {
+      unique[unique.indexOf(prev)] = d;
+      fingerprints.set(key, d);
+    }
   }
   return { ...q, revision: q.revision + 1, drafts: unique };
 }
-export function thresholdReached(drafts: Draft[]): boolean {
+export interface AdmissionThresholds {
+  memory: number;
+  skill: number;
+}
+export function thresholdReached(
+  drafts: Draft[],
+  thresholds: AdmissionThresholds = PROMOTION_THRESHOLDS,
+): boolean {
   return (
-    drafts.filter((d) => d.kind === "memory").length >= 20 ||
-    drafts.filter((d) => d.kind === "skill").length >= 3
+    drafts.filter((d) => d.kind === "memory").length >= thresholds.memory ||
+    drafts.filter((d) => d.kind === "skill").length >= thresholds.skill
+  );
+}
+/** Cap on the persisted per-project formal fingerprints; excess forces a conservative full review. */
+export const FORMAL_FINGERPRINT_CAP = 32;
+/**
+ * Bounded per-project formal fingerprints. The current project is always
+ * preserved; evicting another project's fingerprint is conservative — that
+ * project's next review cannot claim an unchanged formal set and runs full.
+ */
+export function boundedFingerprints(
+  existing: Record<string, string> | undefined,
+  key: string,
+  value: string,
+  cap: number = FORMAL_FINGERPRINT_CAP,
+): Record<string, string> {
+  const next: Record<string, string> = { ...(existing ?? {}), [key]: value };
+  const entries = Object.entries(next);
+  if (entries.length <= cap) return next;
+  const others = entries.filter(([k]) => k !== key);
+  return Object.fromEntries(
+    [[key, value] as [string, string], ...others.slice(0, cap - 1)],
   );
 }

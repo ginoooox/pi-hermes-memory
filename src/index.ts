@@ -1,5 +1,5 @@
 import { CandidateStore } from "./store/candidate-store.js";
-import { CandidateLifecycle } from "./handlers/candidate-lifecycle.js";
+import { CandidateLifecycle, admissionPolicy } from "./handlers/candidate-lifecycle.js";
 /**
  * Pi Hermes Memory Extension
  *
@@ -50,7 +50,7 @@ import { registerPreviewContextCommand } from "./handlers/preview-context.js";
 import { registerStandingPinCommand } from "./handlers/standing-pin.js";
 import { isMemoryChildProcess } from "./handlers/pi-child-process.js";
 import { StandingInstructions } from "./store/standing-instructions.js";
-import { STANDING_FILE } from "./constants.js";
+import { STANDING_FILE, EXTENSION_VERSION } from "./constants.js";
 import { loadConfig } from "./config.js";
 import { detectProject, detectProjectSkills } from "./project.js";
 import { buildPromptContext } from "./prompt-context.js";
@@ -303,6 +303,8 @@ export default function (pi: ExtensionAPI) {
     },
   });
   lifecycle.attach(store);if(projectStore)lifecycle.attach(projectStore,true);
+  // One shared resolver feeds runtime status and the injected policy so both always match the configured lifecycle.
+  const candidateAdmission = admissionPolicy(config);
 
 
   // Skills and pinned instructions must be available even without a lookup.
@@ -317,7 +319,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const file=path.join(globalDir,"runtime-status.json");fs.mkdirSync(globalDir,{recursive:true,mode:0o700});
       const tmp=file+"."+process.pid+".tmp";
-      fs.writeFileSync(tmp,JSON.stringify({version:"0.9.11-candidate.2",loadedAt:new Date().toISOString(),pid:process.pid,source:import.meta.url,lifecycle:"automatic-candidates",memoryThreshold:20,skillThreshold:3,memoryReady:initialization.isReady()},null,2)+"\n",{mode:0o600});fs.renameSync(tmp,file);
+      fs.writeFileSync(tmp,JSON.stringify({version:EXTENSION_VERSION,loadedAt:new Date().toISOString(),pid:process.pid,source:import.meta.url,lifecycle:"automatic-candidates",memoryThreshold:candidateAdmission.thresholds.memory,skillThreshold:candidateAdmission.thresholds.skill,pendingFallbackHours:candidateAdmission.fallbackHours,memoryReady:initialization.isReady()},null,2)+"\n",{mode:0o600});fs.renameSync(tmp,file);
     }catch(error){console.warn("Candidate runtime status unavailable");}
 
   });
@@ -328,7 +330,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, _ctx) => {
     const promptContext = await buildPromptContext(config, store, projectStoreRef(), projectNameRef(), standingStore, isMemoryChildProcess());
     if (!promptContext) return;
-    const candidatePolicy="\nCandidate lifecycle: memory_add/replace/remove and skill_manage writes stage expendable drafts, including edits to existing skills. Pending is not active or discoverable; do not claim it is saved. After each completed user task a model aggressively deletes uncertain/transient drafts and merges semantic duplicates. No sources or deleted-draft history are retained. At 20 retained memories or 3 retained skills a second model review promotes against formal knowledge. Equivalent without improvement is discarded, clearer equivalent replaces, complementary facts merge, unresolved conflict discards the new draft. Formal updates retain one rollback version. Use memory_candidates to inspect drafts; manual per-ID approvals are retired. Direct filesystem edits bypass tool staging and must not be used to save generated memory or skills.";
+    const candidatePolicy=`\nCandidate lifecycle: memory_add/replace/remove and skill_manage writes stage expendable drafts, including edits to existing skills. Pending is not active or discoverable; do not claim it is saved. After each completed user task a routine cleanup pass reviews only new and changed drafts, merges semantic duplicates, deletes uncertain/transient drafts, and extracts new task knowledge from bounded recent task context. An exactly repeated successful cleanup input (canonical drafts/scope, bounded task context and formal fingerprint) skips the cleanup model call. A full pass over all retained drafts is forced by a manual review, unknown or changed formal knowledge, or a pending draft at least ${candidateAdmission.fallbackHours}h old (or with an unparseable pending timestamp); overdue drafts also trigger admission at task-end. At ${candidateAdmission.thresholds.memory} retained memories or ${candidateAdmission.thresholds.skill} retained skills a second model review promotes against formal knowledge. Equivalent without improvement is discarded, clearer equivalent replaces, complementary facts merge, unresolved conflict discards the new draft. Formal updates retain one rollback version. No sources or deleted-draft history are retained. Use memory_candidates to inspect drafts; manual per-ID approvals are retired. Direct filesystem edits bypass tool staging and must not be used to save generated memory or skills.`;
 
 
     // pi 0.86+ hands handlers a normalized clone of these options and re-renders

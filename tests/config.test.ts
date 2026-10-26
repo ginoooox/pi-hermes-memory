@@ -47,6 +47,45 @@ describe("loadConfig", () => {
     // deleted; a positive value opts in, 0/omitted disables.
     assert.strictEqual(config.sessionRetentionDays, 0);
     assert.strictEqual(config.quickCheckOnOpen, true);
+    // Candidate admission defaults: 10 memories / 2 skills / 24h pending fallback.
+    assert.strictEqual(config.candidateMemoryThreshold, 10);
+    assert.strictEqual(config.candidateSkillThreshold, 2);
+    assert.strictEqual(config.candidatePendingFallbackHours, 24);
+  });
+
+  it("honors candidate admission threshold overrides", () => {
+    fs.mkdirSync(path.dirname(TEST_CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({
+      candidateMemoryThreshold: 3,
+      candidateSkillThreshold: 1,
+      candidatePendingFallbackHours: 6,
+    }));
+    const config = loadConfig(TEST_CONFIG_PATH);
+    assert.strictEqual(config.candidateMemoryThreshold, 3);
+    assert.strictEqual(config.candidateSkillThreshold, 1);
+    assert.strictEqual(config.candidatePendingFallbackHours, 6);
+  });
+
+  it("ignores invalid candidate admission threshold values", () => {
+    fs.mkdirSync(path.dirname(TEST_CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({
+      candidateMemoryThreshold: 0,
+      candidateSkillThreshold: -2,
+      candidatePendingFallbackHours: 0,
+    }));
+    let config = loadConfig(TEST_CONFIG_PATH);
+    assert.strictEqual(config.candidateMemoryThreshold, 10);
+    assert.strictEqual(config.candidateSkillThreshold, 2);
+    assert.strictEqual(config.candidatePendingFallbackHours, 24);
+    fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify({
+      candidateMemoryThreshold: "5",
+      candidateSkillThreshold: 2.5,
+      candidatePendingFallbackHours: -12,
+    }));
+    config = loadConfig(TEST_CONFIG_PATH);
+    assert.strictEqual(config.candidateMemoryThreshold, 10);
+    assert.strictEqual(config.candidateSkillThreshold, 2);
+    assert.strictEqual(config.candidatePendingFallbackHours, 24);
   });
 
   it("honors consolidationChunkChars", () => {

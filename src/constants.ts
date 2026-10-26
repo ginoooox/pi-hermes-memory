@@ -83,6 +83,16 @@ export const DEFAULT_FAILURE_INJECTION_MAX_ENTRIES = 5;
  */
 export const DEFAULT_SESSION_RETENTION_DAYS = 0;
 
+// ─── Candidate admission defaults ───
+/** Pending memory drafts that trigger the admission review. */
+export const DEFAULT_CANDIDATE_MEMORY_THRESHOLD = 10;
+/** Pending skill drafts that trigger the admission review. */
+export const DEFAULT_CANDIDATE_SKILL_THRESHOLD = 2;
+/** Pending age in hours that forces a full cleanup+admission review at task end. */
+export const DEFAULT_CANDIDATE_PENDING_FALLBACK_HOURS = 24;
+/** Extension runtime version; a stable literal so the entry point never reads package.json (no import attributes / min-SDK constraints). */
+export const EXTENSION_VERSION = "0.9.11-candidate.3";
+
 // ─── File names ───
 export const MEMORY_FILE = "MEMORY.md";
 export const USER_FILE = "USER.md";
